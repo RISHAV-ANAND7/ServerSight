@@ -6,7 +6,8 @@ import {
   Globe2, Pause, Play, Search, Server, Box, ShieldAlert,
   TrendingDown, TrendingUp, X, Wifi, Zap, RefreshCw,
   FlaskConical, Clock, Flame, LayoutGrid, List, HardDrive,
-  Layers, Terminal, Radio, Info, Trash2, ArrowRight, Bot, Sparkles
+  Layers, Terminal, Radio, Info, Trash2, ArrowRight, Bot, Sparkles,
+  Sun, Moon, ShieldCheck, Filter
 } from 'lucide-react';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, PointElement,
@@ -25,7 +26,8 @@ const timeLabel = (ts) =>
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
   });
 
-function makeChartOpts(unit, max) {
+function makeChartOpts(unit, max, theme = 'dark') {
+  const isDark = theme === 'dark';
   return {
     responsive: true,
     maintainAspectRatio: false,
@@ -36,14 +38,14 @@ function makeChartOpts(unit, max) {
     plugins: {
       legend: { display: false },
       tooltip: {
-        backgroundColor: '#0f172a',
-        borderColor: 'rgba(255, 255, 255, 0.12)',
+        backgroundColor: isDark ? '#0f172a' : '#ffffff',
+        borderColor: isDark ? 'rgba(255, 255, 255, 0.15)' : '#cbd5e1',
         borderWidth: 1,
-        padding: 10,
-        titleColor: '#94a3b8',
-        bodyColor: '#f8fafc',
-        titleFont: { family: 'Plus Jakarta Sans', size: 11, weight: '600' },
-        bodyFont: { family: 'JetBrains Mono', size: 12 },
+        padding: 8,
+        titleColor: isDark ? '#94a3b8' : '#64748b',
+        bodyColor: isDark ? '#f8fafc' : '#0f172a',
+        titleFont: { family: 'Plus Jakarta Sans', size: 12, weight: '600' },
+        bodyFont: { family: 'JetBrains Mono', size: 12.5 },
         callbacks: {
           label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y, 1)} ${unit}`
         }
@@ -57,38 +59,38 @@ function makeChartOpts(unit, max) {
           color: '#64748b',
           maxTicksLimit: 6,
           maxRotation: 0,
-          font: { family: 'JetBrains Mono', size: 10 }
+          font: { family: 'JetBrains Mono', size: 11 }
         }
       },
       y: {
         min: 0,
         max,
-        grid: { color: 'rgba(255, 255, 255, 0.05)' },
+        grid: { color: isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)' },
         border: { display: false },
         ticks: {
           color: '#64748b',
-          maxTicksLimit: 5,
-          padding: 8,
-          font: { family: 'JetBrains Mono', size: 10 },
+          maxTicksLimit: 4,
+          padding: 6,
+          font: { family: 'JetBrains Mono', size: 11 },
           callback: (v) => `${v}${unit}`
         }
       }
     },
     elements: {
-      point: { radius: 0, hoverRadius: 4, hitRadius: 6 },
+      point: { radius: 0, hoverRadius: 3, hitRadius: 5 },
       line: { tension: 0.35, borderWidth: 1.8 }
     }
   };
 }
 
 // ─── Anomaly Detection Engine ─────────────────────────────────────────────────
-const MIN_SAMPLES = 20;   // samples required before baseline is confident
-const HISTORY_CAP = 80;   // rolling evaluation window
-const BASELINE_FRAC = 0.75; // use oldest 75% as baseline
+const MIN_SAMPLES = 20;
+const HISTORY_CAP = 80;
+const BASELINE_FRAC = 0.75;
 const Z_MEDIUM = 2.5;
 const Z_HIGH = 3.0;
 const Z_CRIT = 3.5;
-const RESOLVE_AFTER = 6;    // consecutive normal readings to resolve
+const RESOLVE_AFTER = 6;
 
 function calculateStats(values) {
   const n = values.length;
@@ -133,8 +135,8 @@ function useAnomalyDetection(nodes) {
 
         const checks = [
           { metric: 'cpu', label: 'CPU Usage', unit: '%', cur: node.cpu, vals: h.cpu },
-          { metric: 'netIn', label: 'Inbound Traffic', unit: ' Mbps', cur: node.netIn, vals: h.netIn },
-          { metric: 'netOut', label: 'Outbound Traffic', unit: ' Mbps', cur: node.netOut, vals: h.netOut }
+          { metric: 'netIn', label: 'Network In', unit: ' Mbps', cur: node.netIn, vals: h.netIn },
+          { metric: 'netOut', label: 'Network Out', unit: ' Mbps', cur: node.netOut, vals: h.netOut }
         ];
 
         checks.forEach(({ metric, label, unit, cur, vals }) => {
@@ -148,11 +150,13 @@ function useAnomalyDetection(nodes) {
           const minSd = Math.max(sd, 1.0);
           const z = (cur - mean) / minSd;
           const absZ = Math.abs(z);
-          const isSpike = absZ >= Z_MEDIUM;
 
-          if (isSpike) {
-            const count = existing && !existing.resolved ? existing.count + 1 : 1;
-            const sev = resolveSeverity(absZ, count);
+          if (absZ >= Z_MEDIUM) {
+            const count = (existing?.count || 0) + 1;
+            const peak = Math.max(existing?.peakValue || cur, cur);
+            const peakZ = Math.max(existing?.peakZ || absZ, absZ);
+            const severity = resolveSeverity(peakZ, count);
+
             next[key] = {
               id: key,
               nodeId: node.id,
@@ -160,27 +164,33 @@ function useAnomalyDetection(nodes) {
               metric,
               label,
               unit,
-              currentVal: cur,
+              currentValue: cur,
               baselineMean: mean,
               baselineSd: sd,
               zScore: z,
-              severity: sev,
+              peakZ,
+              peakValue: peak,
+              severity,
               count,
               normalStreak: 0,
-              history: vals.slice(-18),
-              firstSeen: existing && !existing.resolved ? existing.firstSeen : now,
-              lastUpdated: now,
-              resolved: false
+              startedAt: existing?.startedAt || now,
+              lastSeen: now
             };
             changed = true;
-          } else if (existing && !existing.resolved) {
-            const streak = existing.normalStreak + 1;
-            if (streak >= RESOLVE_AFTER) {
-              next[key] = { ...existing, resolved: true, resolvedAt: now, normalStreak: streak };
+          } else if (existing) {
+            const normalStreak = (existing.normalStreak || 0) + 1;
+            if (normalStreak >= RESOLVE_AFTER) {
+              delete next[key];
+              changed = true;
             } else {
-              next[key] = { ...existing, normalStreak: streak, lastUpdated: now };
+              next[key] = {
+                ...existing,
+                currentValue: cur,
+                normalStreak,
+                lastSeen: now
+              };
+              changed = true;
             }
-            changed = true;
           }
         });
       });
@@ -189,278 +199,237 @@ function useAnomalyDetection(nodes) {
     });
   }, [nodes]);
 
-  return incidents;
+  const activeList = useMemo(() => {
+    return Object.values(incidents).sort((a, b) => {
+      const p = { critical: 3, high: 2, medium: 1 };
+      return (p[b.severity] || 0) - (p[a.severity] || 0) || b.peakZ - a.peakZ;
+    });
+  }, [incidents]);
+
+  const clearAll = () => setIncidents({});
+  const dismiss = (id) => setIncidents(prev => {
+    const next = { ...prev };
+    delete next[id];
+    return next;
+  });
+
+  return { activeIncidents: activeList, clearAll, dismiss };
 }
 
-// ─── Initial Seed Nodes ───────────────────────────────────────────────────────
-const INITIAL_NODES = [
-  { id: 'node-01', name: 'api-prod-us-east-1a', region: 'us-east-1', role: 'API', ip: '10.0.1.24', cpu: 31, memory: 63, netIn: 18, netOut: 8, status: 'healthy', source: 'simulated', isSimulated: true },
-  { id: 'node-02', name: 'api-prod-us-east-1b', region: 'us-east-1', role: 'API', ip: '10.0.1.31', cpu: 47, memory: 71, netIn: 24, netOut: 11, status: 'healthy', source: 'simulated', isSimulated: true },
-  { id: 'node-03', name: 'worker-prod-eu-west-1a', region: 'eu-west-1', role: 'Worker', ip: '10.2.4.16', cpu: 68, memory: 54, netIn: 12, netOut: 19, status: 'healthy', source: 'simulated', isSimulated: true },
-  { id: 'node-04', name: 'db-primary-eu-west-1', region: 'eu-west-1', role: 'Database', ip: '10.2.8.5', cpu: 24, memory: 82, netIn: 37, netOut: 42, status: 'healthy', source: 'simulated', isSimulated: true },
-  { id: 'node-05', name: 'cache-prod-ap-south-1', region: 'ap-south-1', role: 'Cache', ip: '10.4.2.11', cpu: 18, memory: 46, netIn: 8, netOut: 6, status: 'healthy', source: 'simulated', isSimulated: true },
-  { id: 'node-06', name: 'worker-prod-ap-south-1', region: 'ap-south-1', role: 'Worker', ip: '10.4.3.19', cpu: 55, memory: 61, netIn: 15, netOut: 22, status: 'healthy', source: 'simulated', isSimulated: true }
-];
+// ─── Custom Professional ServerSight Logo Component ───────────────────────────
+function ServerSightLogo() {
+  return (
+    <div className="brand-logo-svg">
+      <svg width="24" height="24" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="ssLogoGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#6366f1" />
+            <stop offset="50%" stopColor="#06b6d4" />
+            <stop offset="100%" stopColor="#10b981" />
+          </linearGradient>
+        </defs>
+        <path
+          d="M16 2L28 8.8V23.2L16 30L4 23.2V8.8L16 2Z"
+          stroke="url(#ssLogoGrad)"
+          strokeWidth="2.2"
+          strokeLinejoin="round"
+          fill="rgba(99, 102, 241, 0.08)"
+        />
+        <path d="M10 12H22M10 16H22M10 20H22" stroke="currentColor" strokeOpacity="0.22" strokeWidth="1.2" strokeLinecap="round" />
+        <path
+          d="M7 16H11L13.5 11L18.5 21L21 16H25"
+          stroke="url(#ssLogoGrad)"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <circle cx="16" cy="16" r="2.2" fill="#06b6d4" />
+      </svg>
+    </div>
+  );
+}
 
 // ─── Main Application Component ───────────────────────────────────────────────
-function App() {
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'anomalies' | 'chaos_lab'
-  const [viewMode, setViewMode] = useState('grid');     // 'grid' | 'table'
-  const [telemetryView, setTelemetryView] = useState('all'); // 'all' (Demo & Fleet) | 'live' (Live Agents Only)
-  const [serverDemoMode, setServerDemoMode] = useState(true);
-  const [nodes, setNodes] = useState(INITIAL_NODES);
-  const [metrics, setMetrics] = useState({ cpu: 40.5, memory: 62.8, networkIn: 114, networkOut: 108 });
-  const [history, setHistory] = useState([]);
+export function App() {
+  // Theme state: light (default) / dark (optional)
+  const [theme, setTheme] = useState(() => localStorage.getItem('serversight-theme') || 'light');
+
+  // WebSocket & Live Telemetry
+  const [nodes, setNodes] = useState([]);
   const [connected, setConnected] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [range, setRange] = useState('5m');
-  const [query, setQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('All');      // 'All' | 'healthy' | 'recovering' | 'stale' | 'offline'
-  const [regionFilter, setRegionFilter] = useState('All');
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
+
+  // Telemetry scope: 'all' (demo fleet) vs 'live' (agent-sourced only)
+  const [telemetryView, setTelemetryView] = useState('all');
+
+  // Multi-Metric Chart State
+  const [chartMetric, setChartMetric] = useState('cpu'); // 'cpu' | 'mem' | 'net'
+  const [history, setHistory] = useState([]);
+  const histBufferRef = useRef([]);
+
+  // Filters & Search
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState('All');
   const [roleFilter, setRoleFilter] = useState('All');
-  const [benchmarkStats, setBenchmarkStats] = useState(null);
-  const [busyAction, setBusyAction] = useState(null);
-  const [statusNotification, setStatusNotification] = useState('');
+  const [regionFilter, setRegionFilter] = useState('All');
+
+  // Right Deck Tab: 'inspector' | 'radar' | 'lab'
+  const [activeDeckTab, setActiveDeckTab] = useState('inspector');
   const [selectedNode, setSelectedNode] = useState(null);
 
-  const seqRef = useRef(0);
-  const pausedRef = useRef(false);
-  const histBufferRef = useRef([]);
-  useEffect(() => { pausedRef.current = paused; }, [paused]);
+  // Status Notification Toast
+  const [toastMessage, setToastMessage] = useState('');
+  const [busyAction, setBusyAction] = useState(null);
 
-  // Load initial historical samples
+  // Apply theme to document element
   useEffect(() => {
-    fetch('/api/history')
-      .then(r => r.json())
-      .then(data => {
-        if (Array.isArray(data) && data.length > 0) setHistory(data.slice(-180));
-      })
-      .catch(() => { });
-  }, []);
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('serversight-theme', theme);
+  }, [theme]);
 
-  // Poll Benchmark / Runtime Stats
+  const toggleTheme = () => {
+    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+  };
+
+  // WebSocket connection & 4 Hz live stream
   useEffect(() => {
-    let alive = true;
-    const fetchStats = async () => {
-      try {
-        const res = await fetch('/api/benchmark/stats');
-        const data = await res.json();
-        if (alive) setBenchmarkStats(data);
-      } catch { }
-    };
-    fetchStats();
-    const interval = setInterval(fetchStats, 2500);
-    return () => { alive = false; clearInterval(interval); };
-  }, []);
-
-  // Live WebSocket Telemetry Stream (with controlled 1 Hz chart update)
-  useEffect(() => {
-    let socket, retry, alive = true;
-    let retryAttempts = 0;
-
-    const calcBackoff = (attempt) => {
-      const exp = Math.min(16000, 1000 * Math.pow(1.8, attempt));
-      return Math.round(1000 + Math.random() * (exp - 1000));
-    };
-
-    const chartTimer = setInterval(() => {
-      if (!alive || pausedRef.current) return;
-      if (histBufferRef.current.length > 0) {
-        const batch = histBufferRef.current.splice(0, histBufferRef.current.length);
-        setHistory(prev => [...prev, ...batch].slice(-180));
-      }
-    }, 1000);
+    let ws = null;
+    let timer = null;
 
     const connect = () => {
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      socket = new WebSocket(`${proto}//${location.host}/ws`);
-      socket.onopen = () => {
-        if (!alive) return;
-        retryAttempts = 0;
-        setConnected(true);
-      };
-      socket.onmessage = (ev) => {
-        if (!alive || pausedRef.current) return;
-        try {
-          const pkt = JSON.parse(ev.data);
-          if (pkt.nodes) setNodes(pkt.nodes);
-          if (pkt.metrics) setMetrics(pkt.metrics);
-          if (pkt.demoMode !== undefined) setServerDemoMode(pkt.demoMode);
-          const ts = pkt.timestamp || Date.now();
-          histBufferRef.current.push({ ...pkt.metrics, timestamp: ts, seq: pkt.sequence || seqRef.current++ });
-        } catch { }
-      };
-      socket.onclose = () => {
-        if (!alive) return;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.hostname || 'localhost';
+      ws = new WebSocket(`${proto}//${host}:4000/ws`);
+
+      ws.onopen = () => setConnected(true);
+      ws.onclose = () => {
         setConnected(false);
-        retryAttempts++;
-        const delay = calcBackoff(retryAttempts);
-        retry = setTimeout(connect, delay);
+        timer = setTimeout(connect, 2000);
       };
-      socket.onerror = () => socket.close();
+      ws.onerror = () => ws.close();
+
+      ws.onmessage = (evt) => {
+        if (pausedRef.current) return;
+        try {
+          const payload = JSON.parse(evt.data);
+          const incomingNodes = payload.nodes || [];
+          setNodes(incomingNodes);
+
+          if (payload.metrics) {
+            histBufferRef.current.push({
+              time: payload.timestamp || Date.now(),
+              cpu: payload.metrics.cpu,
+              memory: payload.metrics.memory,
+              netIn: payload.metrics.networkIn,
+              netOut: payload.metrics.networkOut
+            });
+            if (histBufferRef.current.length > 50) histBufferRef.current.shift();
+          }
+        } catch (e) {
+          console.error('[WS Parse Error]', e);
+        }
+      };
     };
 
     connect();
     return () => {
-      alive = false;
-      clearInterval(chartTimer);
-      clearTimeout(retry);
-      socket?.close();
+      if (ws) ws.close();
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
-  // Scoped Telemetry Partitioning (Strict Separation of Live Agents from Synthetic Demo Nodes)
-  const liveNodes = useMemo(() => nodes.filter(n => n.source === 'agent' && !n.isSimulated), [nodes]);
-  const simulatedNodes = useMemo(() => nodes.filter(n => n.source !== 'agent' || n.isSimulated), [nodes]);
-  const scopedNodes = useMemo(() => telemetryView === 'live' ? liveNodes : nodes, [telemetryView, liveNodes, nodes]);
+  // Flush chart buffer at 1 Hz for smooth canvas rendering
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (!pausedRef.current && histBufferRef.current.length > 0) {
+        setHistory([...histBufferRef.current]);
+      }
+    }, 1000);
+    return () => clearInterval(iv);
+  }, []);
 
-  // Anomaly Detection State (evaluated on scopedNodes to keep live view free from synthetic demo spikes)
-  const incidents = useAnomalyDetection(scopedNodes);
-  const activeIncidents = useMemo(() => Object.values(incidents).filter(i => !i.resolved), [incidents]);
+  // Anomaly Detection hook
+  const { activeIncidents, clearAll: clearAnomalies, dismiss: dismissAnomaly } = useAnomalyDetection(nodes);
 
-  // Derived Fleet Metrics (calculated strictly from scopedNodes)
-  const activeNodes = scopedNodes.filter(n => n.status !== 'offline');
-  const avgCpu = activeNodes.length
-    ? activeNodes.reduce((s, n) => s + n.cpu, 0) / activeNodes.length
-    : (scopedNodes.length ? scopedNodes.reduce((s, n) => s + n.cpu, 0) / scopedNodes.length : 0);
-  const avgMem = activeNodes.length
-    ? activeNodes.reduce((s, n) => s + n.memory, 0) / activeNodes.length
-    : (scopedNodes.length ? scopedNodes.reduce((s, n) => s + n.memory, 0) / scopedNodes.length : 0);
-  const totalIn = scopedNodes.reduce((s, n) => s + (n.status === 'offline' ? 0 : n.netIn), 0);
-  const totalOut = scopedNodes.reduce((s, n) => s + (n.status === 'offline' ? 0 : n.netOut), 0);
+  // Auto-select first node if none selected or keep current node refreshed
+  useEffect(() => {
+    if (nodes.length > 0) {
+      if (!selectedNode) {
+        setSelectedNode(nodes[0]);
+      } else {
+        const updated = nodes.find(n => n.id === selectedNode.id);
+        if (updated) setSelectedNode(updated);
+      }
+    }
+  }, [nodes]);
 
+  // Telemetry View filtering: All vs Pure Live Agents
+  const scopedNodes = useMemo(() => {
+    if (telemetryView === 'live') {
+      return nodes.filter(n => n.source === 'agent' && !n.isSimulated);
+    }
+    return nodes;
+  }, [nodes, telemetryView]);
+
+  // Filtered nodes for the fleet table
+  const filteredNodes = useMemo(() => {
+    return scopedNodes.filter(node => {
+      const matchSearch = !searchTerm ||
+        node.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        node.ip.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        node.id.toLowerCase().includes(searchTerm.toLowerCase());
+      const matchStatus = statusFilter === 'All' || node.status === statusFilter;
+      const matchRole = roleFilter === 'All' || node.role === roleFilter;
+      const matchRegion = regionFilter === 'All' || node.region === regionFilter;
+      return matchSearch && matchStatus && matchRole && matchRegion;
+    });
+  }, [scopedNodes, searchTerm, statusFilter, roleFilter, regionFilter]);
+
+  // Cluster aggregate KPI calculations
+  const totalCount = scopedNodes.length;
   const healthyCount = scopedNodes.filter(n => n.status === 'healthy').length;
-  const recoveringCount = scopedNodes.filter(n => n.status === 'recovering').length;
   const staleCount = scopedNodes.filter(n => n.status === 'stale').length;
   const offlineCount = scopedNodes.filter(n => n.status === 'offline').length;
+  const avgCpu = totalCount > 0 ? scopedNodes.reduce((acc, n) => acc + (n.cpu || 0), 0) / totalCount : 0;
+  const avgMem = totalCount > 0 ? scopedNodes.reduce((acc, n) => acc + (n.memory || 0), 0) / totalCount : 0;
+  const totalNetIn = scopedNodes.reduce((acc, n) => acc + (n.netIn || 0), 0);
+  const totalNetOut = scopedNodes.reduce((acc, n) => acc + (n.netOut || 0), 0);
 
-  // Filtered Nodes (from scopedNodes)
-  const filteredNodes = useMemo(() => {
-    return scopedNodes.filter(n => {
-      const matchStatus = statusFilter === 'All' || n.status === statusFilter;
-      const matchRegion = regionFilter === 'All' || n.region === regionFilter;
-      const matchRole = roleFilter === 'All' || n.role === roleFilter;
-      const q = query.trim().toLowerCase();
-      const matchQuery = !q || `${n.name} ${n.ip} ${n.role} ${n.region}`.toLowerCase().includes(q);
-      return matchStatus && matchRegion && matchRole && matchQuery;
-    });
-  }, [scopedNodes, statusFilter, regionFilter, roleFilter, query]);
-
-  // Chart Telemetry Data Slices
-  const visibleHistory = useMemo(() => {
-    const limits = { '1m': 16, '5m': 60, '15m': 180 };
-    return history.slice(-(limits[range] || 60));
-  }, [history, range]);
-
-  const chartLabels = useMemo(
-    () => visibleHistory.map((p, i) => i % 5 === 0 ? timeLabel(p.timestamp) : ''),
-    [visibleHistory]
-  );
-
-  const cpuChartData = {
-    labels: chartLabels,
-    datasets: [
-      {
-        label: 'Fleet CPU',
-        data: visibleHistory.map(p => p.cpu),
-        borderColor: '#4f46e5',
-        backgroundColor: 'rgba(79, 70, 229, 0.12)',
-        fill: true
-      },
-      {
-        label: 'Fleet Memory',
-        data: visibleHistory.map(p => p.memory),
-        borderColor: '#0ea5e9',
-        backgroundColor: 'rgba(14, 165, 233, 0.04)',
-        fill: false
-      }
-    ]
-  };
-
-  const netChartData = {
-    labels: chartLabels,
-    datasets: [
-      {
-        label: 'Inbound Ingress',
-        data: visibleHistory.map(p => p.networkIn),
-        borderColor: '#0284c7',
-        backgroundColor: 'rgba(2, 132, 199, 0.12)',
-        fill: true
-      },
-      {
-        label: 'Outbound Egress',
-        data: visibleHistory.map(p => p.networkOut),
-        borderColor: '#d97706',
-        backgroundColor: 'rgba(217, 119, 6, 0.03)',
-        fill: false
-      }
-    ]
-  };
-
-  // Actions
-  const handleChaosAction = async (actionKey, label, endpoint, body = {}) => {
-    setBusyAction(actionKey);
-    setStatusNotification(`Running: ${label}...`);
+  // Helper to trigger API actions
+  const triggerApi = async (url, method = 'POST', body = null, desc = '') => {
+    setBusyAction(desc);
+    setToastMessage(`Executing: ${desc}...`);
     try {
-      await fetch(endpoint, {
-        method: 'POST',
+      const res = await fetch(url, {
+        method,
         headers: {
-          'content-type': 'application/json',
+          'Content-Type': 'application/json',
           'x-admin-token': 'serversight-admin-secret-token'
         },
-        body: JSON.stringify(body)
-      });
-      setStatusNotification(`Simulation active: ${label}`);
-    } catch (e) {
-      setStatusNotification(`Error: ${e.message}`);
-    } finally {
-      setTimeout(() => setBusyAction(null), 1200);
-      setTimeout(() => setStatusNotification(''), 4000);
-    }
-  };
-
-  const handleResetFaults = async () => {
-    setBusyAction('reset');
-    setStatusNotification('Clearing all active faults and restoring normal state...');
-    try {
-      await fetch('/api/faults/reset', {
-        method: 'POST',
-        headers: { 'x-admin-token': 'serversight-admin-secret-token' }
-      });
-      setStatusNotification('All simulated faults cleared. Fleet returned to normal.');
-    } catch (e) {
-      setStatusNotification(`Reset error: ${e.message}`);
-    } finally {
-      setTimeout(() => setBusyAction(null), 1000);
-      setTimeout(() => setStatusNotification(''), 3000);
-    }
-  };
-
-  const handlePruneOfflineNodes = async () => {
-    setBusyAction('prune');
-    try {
-      const res = await fetch('/api/nodes/prune', {
-        method: 'POST',
-        headers: { 'x-admin-token': 'serversight-admin-secret-token' }
+        body: body ? JSON.stringify(body) : undefined
       });
       const data = await res.json();
-      setStatusNotification(`Cleaned up ${data.removedCount || 0} offline test node(s).`);
-    } catch (e) {
-      setStatusNotification(`Prune error: ${e.message}`);
+      setToastMessage(`✓ ${desc} completed successfully`);
+      return data;
+    } catch (err) {
+      setToastMessage(`✗ Failed: ${err.message}`);
     } finally {
-      setTimeout(() => setBusyAction(null), 1000);
-      setTimeout(() => setStatusNotification(''), 3000);
+      setTimeout(() => setBusyAction(null), 800);
+      setTimeout(() => setToastMessage(''), 3000);
     }
   };
 
+  // CSV Export with all 9 columns
   const exportCsv = () => {
-    const header = ['id', 'name', 'region', 'role', 'ip', 'cpu', 'memory', 'netIn', 'netOut', 'status'];
+    const headers = ['Node', 'Role', 'Region', 'IP', 'CPU %', 'Mem %', 'Net In Mbps', 'Net Out Mbps', 'Status'];
     const rows = filteredNodes.map(n => [
-      n.id, n.name, n.region, n.role, n.ip,
+      n.name, n.role, n.region, n.ip,
       fmt(n.cpu, 1), fmt(n.memory, 1), fmt(n.netIn, 1), fmt(n.netOut, 1), n.status
     ]);
-    const csv = [header.join(','), ...rows.map(r => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -469,1055 +438,776 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  // Helper for region labels
-  const renderRegion = (region) => {
-    if (region === 'us-east-1') return 'us-east-1 (N. Virginia)';
-    if (region === 'eu-west-1') return 'eu-west-1 (Ireland)';
-    if (region === 'ap-south-1') return 'ap-south-1 (Mumbai)';
-    return region || 'Global';
-  };
+  // Chart dataset generation
+  const chartLabels = history.map(h => timeLabel(h.time));
+  const isDark = theme === 'dark';
+
+  const chartData = useMemo(() => {
+    if (chartMetric === 'cpu') {
+      return {
+        labels: chartLabels,
+        datasets: [{
+          label: 'Fleet Average CPU',
+          data: history.map(h => h.cpu),
+          borderColor: '#6366f1',
+          backgroundColor: isDark ? 'rgba(99, 102, 241, 0.12)' : 'rgba(99, 102, 241, 0.08)',
+          fill: true
+        }]
+      };
+    }
+    if (chartMetric === 'mem') {
+      return {
+        labels: chartLabels,
+        datasets: [{
+          label: 'Fleet Average Memory',
+          data: history.map(h => h.memory),
+          borderColor: '#10b981',
+          backgroundColor: isDark ? 'rgba(16, 185, 129, 0.12)' : 'rgba(16, 185, 129, 0.08)',
+          fill: true
+        }]
+      };
+    }
+    return {
+      labels: chartLabels,
+      datasets: [
+        {
+          label: 'Network Inbound',
+          data: history.map(h => h.netIn),
+          borderColor: '#06b6d4',
+          backgroundColor: isDark ? 'rgba(6, 182, 212, 0.12)' : 'rgba(6, 182, 212, 0.08)',
+          fill: true
+        },
+        {
+          label: 'Network Outbound',
+          data: history.map(h => h.netOut),
+          borderColor: '#a855f7',
+          backgroundColor: 'transparent',
+          fill: false,
+          borderDash: [4, 4]
+        }
+      ]
+    };
+  }, [history, chartMetric, isDark, chartLabels]);
+
+  const currentOpts = useMemo(() => {
+    if (chartMetric === 'cpu') return makeChartOpts('%', 100, theme);
+    if (chartMetric === 'mem') return makeChartOpts('%', 100, theme);
+    return makeChartOpts(' Mbps', undefined, theme);
+  }, [chartMetric, theme]);
 
   return (
-    <div className="app-shell">
-      {/* ─── Modern SaaS Navigation Sidebar ─── */}
-      <aside className="app-sidebar">
-        <div className="brand-header">
-          <div className="brand-icon">
-            <Radio size={17} />
+    <div className="app-screen">
+      {/* ─── 1. TOP NAVBAR (48px) ─── */}
+      <header className="top-navbar">
+        <div className="nav-left">
+          <div className="brand-group" onClick={() => setSelectedNode(nodes[0])}>
+            <ServerSightLogo />
+            <span className="brand-title">ServerSight</span>
+            <span className="brand-badge">PROD</span>
           </div>
-          <div className="brand-info">
-            <span className="brand-name">ServerSight</span>
-            <span className="brand-tagline">Cloud Observability</span>
-          </div>
-        </div>
 
-        <nav className="sidebar-menu">
-          <button
-            className={`sidebar-nav-item ${activeTab === 'overview' ? 'active' : ''}`}
-            onClick={() => setActiveTab('overview')}
-          >
-            <div className="sidebar-nav-left">
-              <Layers size={16} />
-              <span>Fleet Overview</span>
-            </div>
-            <span className="nav-counter">{nodes.length}</span>
-          </button>
+          <div className="nav-divider" />
 
-          <button
-            className={`sidebar-nav-item ${activeTab === 'anomalies' ? 'active' : ''}`}
-            onClick={() => setActiveTab('anomalies')}
-          >
-            <div className="sidebar-nav-left">
-              <ShieldAlert size={16} />
-              <span>Anomaly Radar</span>
-            </div>
-            {activeIncidents.length > 0 && (
-              <span className="nav-counter alert">{activeIncidents.length}</span>
-            )}
-          </button>
-
-          <button
-            className={`sidebar-nav-item ${activeTab === 'chaos_lab' ? 'active' : ''}`}
-            onClick={() => setActiveTab('chaos_lab')}
-          >
-            <div className="sidebar-nav-left">
-              <FlaskConical size={16} />
-              <span>Reliability Lab</span>
-            </div>
-          </button>
-        </nav>
-
-        <div className="sidebar-footer">
-          <div className="connection-status-pill">
-            <div className="status-indicator-dot">
-              <span className={`dot-indicator ${connected ? '' : 'offline'}`} />
-              <span>{connected ? 'Live 4 Hz Stream' : 'Connecting...'}</span>
-            </div>
-            <span className="latency-badge">11ms p95</span>
+          {/* Real-Time Stream Beacon */}
+          <div className="live-beacon-pill" title={connected ? 'WebSocket connected to /ws (4 Hz streaming)' : 'Connecting...'}>
+            <span className={`beacon-dot ${!connected ? 'offline' : paused ? 'paused' : ''}`} />
+            <span>{connected ? (paused ? 'Stream Paused' : '4 Hz Live') : 'Connecting...'}</span>
+            <span className="latency-tag">14ms p95</span>
           </div>
         </div>
-      </aside>
 
-      {/* ─── Main Content Canvas ─── */}
-      <main className="main-canvas">
-        {/* Topbar Command Header */}
-        <header className="topbar">
-          <div className="topbar-breadcrumbs">
-            <span className="crumb-root">Infrastructure</span>
-            <span className="crumb-separator">/</span>
-            <span className="crumb-active">
-              {activeTab === 'overview' && 'Fleet Overview'}
-              {activeTab === 'anomalies' && 'Anomaly Radar'}
-              {activeTab === 'chaos_lab' && 'Reliability & Stress Lab'}
-            </span>
-            <span className="env-tag">Production</span>
-          </div>
-
-          <div className="topbar-controls">
-            {/* Telemetry Mode Selector: Demo Fleet vs Live Agents Only */}
-            <div className="telemetry-mode-selector">
-              <button
-                className={`telemetry-mode-tab ${telemetryView === 'all' ? 'active demo' : ''}`}
-                onClick={() => setTelemetryView('all')}
-                title="View all fleet nodes including synthetic demo servers"
-              >
-                <Sparkles size={13} />
-                <span>Demo Fleet</span>
-                <span className="mode-count-pill demo">6 Sim</span>
-              </button>
-              <button
-                className={`telemetry-mode-tab ${telemetryView === 'live' ? 'active live' : ''}`}
-                onClick={() => setTelemetryView('live')}
-                title="Filter to pure host agent telemetry only (excludes all simulated nodes)"
-              >
-                <Radio size={13} className={liveNodes.length > 0 ? 'pulse-icon' : ''} />
-                <span>Live Agents Only</span>
-                <span className={`mode-count-pill ${liveNodes.length > 0 ? 'live' : 'zero'}`}>
-                  {liveNodes.length} Active
-                </span>
-              </button>
-            </div>
-
-            <div className="topbar-search">
-              <Search size={14} color="#64748b" />
-              <input
-                type="text"
-                className="search-input-field"
-                placeholder="Search nodes, roles, regions..."
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-              />
-              {query && (
-                <button onClick={() => setQuery('')} style={{ color: '#64748b' }}>
-                  <X size={13} />
-                </button>
-              )}
-            </div>
-
+        <div className="nav-right">
+          {/* Telemetry Scope Switcher: Demo Fleet vs Pure Live Agents */}
+          <div className="view-mode-pill">
             <button
-              className={`btn-secondary ${paused ? 'active' : ''}`}
-              onClick={() => setPaused(p => !p)}
-              title={paused ? 'Resume live telemetry stream' : 'Pause dashboard stream'}
+              className={`view-mode-btn ${telemetryView === 'all' ? 'active demo' : ''}`}
+              onClick={() => setTelemetryView('all')}
+              title="View demonstration fleet (includes 6 simulated baseline nodes)"
             >
-              {paused ? <Play size={13} fill="currentColor" /> : <Pause size={13} fill="currentColor" />}
-              <span>{paused ? 'Resume' : 'Pause'}</span>
+              <Sparkles size={12} />
+              <span>Demo Fleet</span>
             </button>
-
-            <button className="btn-secondary" onClick={exportCsv} title="Export filtered fleet data to CSV">
-              <Download size={13} />
-              <span>Export CSV</span>
+            <button
+              className={`view-mode-btn ${telemetryView === 'live' ? 'active live' : ''}`}
+              onClick={() => setTelemetryView('live')}
+              title="Display purely authentic external agent telemetry (excludes simulated data)"
+            >
+              <Radio size={12} />
+              <span>Live Agents</span>
             </button>
           </div>
-        </header>
 
-        {/* Content Body */}
-        <div className="content-body">
-          {/* Live Agent Telemetry Banner */}
-          {telemetryView === 'live' && (
-            <div className="live-view-banner">
-              <div className="live-view-banner-left">
-                <div className="live-indicator-beacon" />
-                <div>
-                  <div className="live-banner-headline">PURE LIVE-AGENT TELEMETRY VIEW</div>
-                  <div className="live-banner-sub">
-                    Displaying authentic host agent telemetry only. All 6 synthetic demonstration nodes and simulated metric fluctuations are excluded.
-                  </div>
-                </div>
-              </div>
-              <div className="live-banner-right">
-                <span className="live-agent-badge-count">{liveNodes.length} Verified {liveNodes.length === 1 ? 'Agent' : 'Agents'}</span>
-                <button className="btn-return-demo" onClick={() => setTelemetryView('all')}>
-                  <Sparkles size={12} /> Switch to Demo Mode
+          {/* Stream Play/Pause */}
+          <button
+            className="nav-action-btn"
+            onClick={() => setPaused(p => !p)}
+            title={paused ? 'Resume live telemetry stream' : 'Pause telemetry stream'}
+          >
+            {paused ? <Play size={12} fill="currentColor" /> : <Pause size={12} fill="currentColor" />}
+            <span>{paused ? 'Resume' : 'Pause'}</span>
+          </button>
+
+          {/* CSV Export */}
+          <button className="nav-action-btn" onClick={exportCsv} title="Export filtered fleet telemetry to CSV">
+            <Download size={12} />
+            <span>Export CSV</span>
+          </button>
+
+          {/* Light / Dark Mode Toggle */}
+          <button
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            aria-label="Toggle Theme"
+          >
+            {theme === 'dark' ? <Sun size={15} color="#fbbf24" /> : <Moon size={15} color="#475569" />}
+          </button>
+        </div>
+      </header>
+
+      {/* ─── 2. KPI METRICS RIBBON (66px) ─── */}
+      <section className="kpi-ribbon">
+        {/* Tile 1: Fleet Health */}
+        <div className="kpi-tile">
+          <div className="kpi-tile-header">
+            <span className="kpi-title"><Wifi size={12} color="#10b981" /> Cluster Health</span>
+            <span className={`kpi-badge ${healthyCount === totalCount && totalCount > 0 ? 'optimal' : offlineCount > 0 ? 'alert' : 'warning'}`}>
+              {totalCount === 0 ? 'Idle' : healthyCount === totalCount ? 'Optimal' : `${offlineCount} Offline`}
+            </span>
+          </div>
+          <div className="kpi-body">
+            <div className="kpi-metric">
+              <span className="kpi-value">{healthyCount}</span>
+              <span className="kpi-unit">/ {totalCount} online</span>
+            </div>
+            <span className="kpi-sub">
+              {totalCount > 0 ? `${Math.round((healthyCount / totalCount) * 100)}% Available` : '0 nodes'}
+            </span>
+          </div>
+          <div className="kpi-bar">
+            <div
+              className="kpi-bar-fill"
+              style={{
+                width: `${totalCount > 0 ? (healthyCount / totalCount) * 100 : 0}%`,
+                background: healthyCount === totalCount ? '#10b981' : '#f59e0b'
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Tile 2: Fleet CPU */}
+        <div className="kpi-tile">
+          <div className="kpi-tile-header">
+            <span className="kpi-title"><Cpu size={12} color="#6366f1" /> Avg Fleet CPU</span>
+            <span className={`kpi-badge ${avgCpu > 75 ? 'alert' : avgCpu > 50 ? 'warning' : 'optimal'}`}>
+              {avgCpu > 75 ? 'High' : 'Normal'}
+            </span>
+          </div>
+          <div className="kpi-body">
+            <div className="kpi-metric">
+              <span className="kpi-value">{fmt(avgCpu, 1)}</span>
+              <span className="kpi-unit">%</span>
+            </div>
+            <span className="kpi-sub">
+              Peak: {fmt(Math.max(0, ...scopedNodes.map(n => n.cpu || 0)), 1)}%
+            </span>
+          </div>
+          <div className="kpi-bar">
+            <div
+              className="kpi-bar-fill"
+              style={{
+                width: `${Math.min(avgCpu, 100)}%`,
+                background: avgCpu > 75 ? '#ef4444' : avgCpu > 50 ? '#f59e0b' : '#6366f1'
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Tile 3: Fleet Memory */}
+        <div className="kpi-tile">
+          <div className="kpi-tile-header">
+            <span className="kpi-title"><HardDrive size={12} color="#10b981" /> Memory Allocated</span>
+            <span className={`kpi-badge ${avgMem > 80 ? 'alert' : avgMem > 65 ? 'warning' : 'optimal'}`}>
+              {avgMem > 80 ? 'Constrained' : 'Nominal'}
+            </span>
+          </div>
+          <div className="kpi-body">
+            <div className="kpi-metric">
+              <span className="kpi-value">{fmt(avgMem, 1)}</span>
+              <span className="kpi-unit">%</span>
+            </div>
+            <span className="kpi-sub">
+              Active: {scopedNodes.filter(n => n.memory > 60).length} hosts &gt;60%
+            </span>
+          </div>
+          <div className="kpi-bar">
+            <div
+              className="kpi-bar-fill"
+              style={{
+                width: `${Math.min(avgMem, 100)}%`,
+                background: avgMem > 80 ? '#ef4444' : '#10b981'
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Tile 4: Network Throughput */}
+        <div className="kpi-tile">
+          <div className="kpi-tile-header">
+            <span className="kpi-title"><Activity size={12} color="#06b6d4" /> Total Network I/O</span>
+            <span className="kpi-badge optimal">Streaming</span>
+          </div>
+          <div className="kpi-body">
+            <div className="kpi-metric">
+              <span className="kpi-value">{fmt(totalNetIn + totalNetOut, 1)}</span>
+              <span className="kpi-unit">Mbps</span>
+            </div>
+            <span className="kpi-sub">
+              ↓ {fmt(totalNetIn, 1)} / ↑ {fmt(totalNetOut, 1)}
+            </span>
+          </div>
+          <div className="kpi-bar">
+            <div
+              className="kpi-bar-fill"
+              style={{
+                width: `${Math.min(((totalNetIn + totalNetOut) / 200) * 100, 100)}%`,
+                background: '#06b6d4'
+              }}
+            />
+          </div>
+        </div>
+      </section>
+
+      {/* ─── 3. MAIN WORKSPACE (calc(100vh - 114px)) ─── */}
+      <main className="workspace-grid">
+        {/* ─── LEFT COLUMN: Timeline Chart + Fleet Table ─── */}
+        <div className="main-column">
+          {/* Real-Time Telemetry Timeline Card */}
+          <div className="chart-card">
+            <div className="chart-header">
+              <div className="chart-tabs">
+                <button
+                  className={`chart-tab-btn ${chartMetric === 'cpu' ? 'active cpu' : ''}`}
+                  onClick={() => setChartMetric('cpu')}
+                >
+                  <Cpu size={12} />
+                  <span>CPU Utilization</span>
+                </button>
+                <button
+                  className={`chart-tab-btn ${chartMetric === 'mem' ? 'active mem' : ''}`}
+                  onClick={() => setChartMetric('mem')}
+                >
+                  <HardDrive size={12} />
+                  <span>Memory Usage</span>
+                </button>
+                <button
+                  className={`chart-tab-btn ${chartMetric === 'net' ? 'active net' : ''}`}
+                  onClick={() => setChartMetric('net')}
+                >
+                  <Activity size={12} />
+                  <span>Network Traffic</span>
                 </button>
               </div>
-            </div>
-          )}
 
-          {/* Status notification toast/pill if any action running */}
-          {statusNotification && (
-            <div style={{
-              background: 'rgba(79, 70, 229, 0.12)',
-              border: '1px solid rgba(79, 70, 229, 0.28)',
-              borderRadius: 8,
-              padding: '10px 16px',
-              fontSize: 12.5,
-              color: '#c7d2fe',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8
-            }}>
-              <Activity size={14} color="#818cf8" />
-              <span>{statusNotification}</span>
-            </div>
-          )}
-
-          {/* Active Anomaly Banner */}
-          {activeIncidents.length > 0 && (
-            <div className="alert-banner">
-              <div className="alert-banner-left">
-                <div className="alert-icon-box">
-                  <Flame size={18} />
+              <div className="chart-meta">
+                <div className="chart-stat-item">
+                  <span>Current:</span>
+                  <span className="chart-stat-val">
+                    {chartMetric === 'cpu' && `${fmt(avgCpu, 1)}%`}
+                    {chartMetric === 'mem' && `${fmt(avgMem, 1)}%`}
+                    {chartMetric === 'net' && `${fmt(totalNetIn + totalNetOut, 1)} Mbps`}
+                  </span>
                 </div>
-                <div>
-                  <div className="alert-title">
-                    {activeIncidents.length} Statistical {activeIncidents.length === 1 ? 'Anomaly' : 'Anomalies'} Detected
-                  </div>
-                  <div className="alert-sub">
-                    Unexpected spike observed on {activeIncidents.map(i => `${i.nodeName} (${i.label})`).join(', ')}. Value exceeds rolling 5-minute baseline.
-                  </div>
+                <div className="chart-stat-item">
+                  <span>Window:</span>
+                  <span className="chart-stat-val">60s Live</span>
                 </div>
               </div>
-              <button className="btn-primary" onClick={() => setActiveTab('anomalies')}>
-                <span>Inspect in Radar</span>
-                <ArrowRight size={13} />
-              </button>
             </div>
-          )}
 
-          {/* ══════════════ TAB 1: FLEET OVERVIEW ══════════════ */}
-          {activeTab === 'overview' && (
-            <>
-              {telemetryView === 'live' && liveNodes.length === 0 ? (
-                <div className="empty-live-agents-card">
-                  <div className="empty-icon-halo">
-                    <Radio size={28} color="#10b981" />
-                  </div>
-                  <h3 className="empty-live-title">No Live Agents Currently Connected</h3>
-                  <p className="empty-live-text">
-                    ServerSight is in <b>Live Agents Only</b> mode, filtering out all 6 synthetic demonstration nodes. Telemetry from real hosts will stream here in real time as soon as an agent is started.
-                  </p>
-                  <div className="empty-agent-command-box">
-                    <div className="cmd-header">
-                      <span>Start a live host telemetry agent</span>
-                      <span className="cmd-tag">Terminal</span>
+            <div className="chart-canvas-wrap">
+              <Line data={chartData} options={currentOpts} />
+            </div>
+          </div>
+
+          {/* Fleet Nodes Table Card */}
+          <div className="fleet-card">
+            {/* Toolbar */}
+            <div className="fleet-toolbar">
+              <div className="fleet-toolbar-left">
+                {/* Search */}
+                <div className="search-input-wrap">
+                  <Search size={12} className="search-input-icon" />
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder="Search node or IP..."
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                  />
+                </div>
+
+                {/* Role select */}
+                <select
+                  className="filter-select"
+                  value={roleFilter}
+                  onChange={e => setRoleFilter(e.target.value)}
+                >
+                  <option value="All">All Roles</option>
+                  <option value="API">API Gateway</option>
+                  <option value="Worker">Worker</option>
+                  <option value="Database">Database</option>
+                  <option value="Cache">Cache</option>
+                </select>
+
+                {/* Region select */}
+                <select
+                  className="filter-select"
+                  value={regionFilter}
+                  onChange={e => setRegionFilter(e.target.value)}
+                >
+                  <option value="All">All Regions</option>
+                  <option value="us-east-1">us-east-1</option>
+                  <option value="eu-west-1">eu-west-1</option>
+                  <option value="ap-south-1">ap-south-1</option>
+                </select>
+              </div>
+
+              <div className="fleet-toolbar-right">
+                {/* Status chips */}
+                <div className="status-chip-group">
+                  <button
+                    className={`status-chip ${statusFilter === 'All' ? 'active' : ''}`}
+                    onClick={() => setStatusFilter('All')}
+                  >
+                    All ({scopedNodes.length})
+                  </button>
+                  <button
+                    className={`status-chip ${statusFilter === 'healthy' ? 'active' : ''}`}
+                    onClick={() => setStatusFilter('healthy')}
+                  >
+                    Healthy ({healthyCount})
+                  </button>
+                  {offlineCount > 0 && (
+                    <button
+                      className={`status-chip ${statusFilter === 'offline' ? 'active' : ''}`}
+                      onClick={() => setStatusFilter('offline')}
+                    >
+                      Offline ({offlineCount})
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Structured Table */}
+            <div className="table-scroll-container">
+              <table className="fleet-table">
+                <thead>
+                  <tr>
+                    <th>Node Hostname</th>
+                    <th>Role</th>
+                    <th>Region</th>
+                    <th>CPU Load</th>
+                    <th>Memory</th>
+                    <th>Network</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredNodes.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} style={{ textAlign: 'center', padding: '30px', color: 'var(--text-muted)' }}>
+                        {telemetryView === 'live'
+                          ? 'No live host agents currently connected. Start an agent using AGENT_TOKEN to see telemetry here.'
+                          : 'No nodes match the selected search and filter criteria.'}
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredNodes.map(node => {
+                      const isSelected = selectedNode?.id === node.id;
+                      const hasAlert = activeIncidents.some(i => i.nodeId === node.id);
+
+                      return (
+                        <tr
+                          key={node.id}
+                          className={`${isSelected ? 'selected' : ''}`}
+                          onClick={() => setSelectedNode(node)}
+                        >
+                          <td>
+                            <div className="node-cell-primary">
+                              <span className={`status-dot ${node.status || 'healthy'}`} />
+                              <div>
+                                <div className="node-name-text">{node.name}</div>
+                                <div className="node-ip-text">{node.ip}</div>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            <span className="role-pill">
+                              {node.role === 'Database' && <Database size={10} color="#f59e0b" />}
+                              {node.role === 'Cache' && <Box size={10} color="#06b6d4" />}
+                              {node.role === 'API' && <Globe2 size={10} color="#6366f1" />}
+                              {node.role === 'Worker' && <Server size={10} color="#10b981" />}
+                              <span>{node.role}</span>
+                            </span>
+                          </td>
+                          <td>
+                            <span className="region-text">{node.region}</span>
+                          </td>
+                          <td className="metric-bar-cell">
+                            <div className="bar-with-label">
+                              <div className="mini-bar-track">
+                                <div
+                                  className="mini-bar-fill"
+                                  style={{
+                                    width: `${Math.min(node.cpu, 100)}%`,
+                                    background: node.cpu > 75 ? '#ef4444' : node.cpu > 50 ? '#f59e0b' : '#6366f1'
+                                  }}
+                                />
+                              </div>
+                              <span className="metric-number-mono">{fmt(node.cpu, 1)}%</span>
+                            </div>
+                          </td>
+                          <td className="metric-bar-cell">
+                            <div className="bar-with-label">
+                              <div className="mini-bar-track">
+                                <div
+                                  className="mini-bar-fill"
+                                  style={{
+                                    width: `${Math.min(node.memory, 100)}%`,
+                                    background: node.memory > 80 ? '#ef4444' : '#10b981'
+                                  }}
+                                />
+                              </div>
+                              <span className="metric-number-mono">{fmt(node.memory, 1)}%</span>
+                            </div>
+                          </td>
+                          <td>
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', color: 'var(--text-secondary)' }}>
+                              {fmt(node.netIn, 0)} / {fmt(node.netOut, 0)} Mbps
+                            </span>
+                          </td>
+                          <td>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                              <span style={{
+                                textTransform: 'capitalize',
+                                fontWeight: '600',
+                                color: node.status === 'healthy' ? 'var(--emerald)' : node.status === 'stale' ? 'var(--amber)' : 'var(--rose)'
+                              }}>
+                                {node.status || 'healthy'}
+                              </span>
+                              {hasAlert && <Flame size={12} color="#ef4444" />}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {/* ─── RIGHT COLUMN: Inspector & Radar Deck ─── */}
+        <aside className="deck-card">
+          {/* Deck Tab Header */}
+          <div className="deck-tabs-header">
+            <button
+              className={`deck-tab-btn ${activeDeckTab === 'inspector' ? 'active' : ''}`}
+              onClick={() => setActiveDeckTab('inspector')}
+            >
+              <Server size={13} />
+              <span>Inspector</span>
+            </button>
+            <button
+              className={`deck-tab-btn ${activeDeckTab === 'radar' ? 'active' : ''}`}
+              onClick={() => setActiveDeckTab('radar')}
+            >
+              <ShieldAlert size={13} />
+              <span>Anomalies</span>
+              {activeIncidents.length > 0 && (
+                <span className="deck-count-pill">{activeIncidents.length}</span>
+              )}
+            </button>
+            <button
+              className={`deck-tab-btn ${activeDeckTab === 'lab' ? 'active' : ''}`}
+              onClick={() => setActiveDeckTab('lab')}
+            >
+              <FlaskConical size={13} />
+              <span>Stress Lab</span>
+            </button>
+          </div>
+
+          {/* Deck Body */}
+          <div className="deck-body">
+            {/* ── TAB 1: NODE INSPECTOR ── */}
+            {activeDeckTab === 'inspector' && (
+              selectedNode ? (
+                <div>
+                  <div className="inspector-node-header">
+                    <div>
+                      <div className="inspector-node-title">{selectedNode.name}</div>
+                      <div className="inspector-node-sub">
+                        <span>{selectedNode.ip}</span>
+                        <span>&bull;</span>
+                        <span>{selectedNode.region}</span>
+                        <span>&bull;</span>
+                        <span style={{
+                          color: selectedNode.source === 'agent' && !selectedNode.isSimulated ? 'var(--emerald)' : 'var(--indigo)'
+                        }}>
+                          {selectedNode.source === 'agent' && !selectedNode.isSimulated ? 'Live Agent' : 'Synthetic Demo'}
+                        </span>
+                      </div>
                     </div>
-                    <code>AGENT_TOKEN=serversight-agent-secret-token node agent/agent.js</code>
+                    <span style={{
+                      padding: '2px 8px',
+                      borderRadius: 'var(--radius-xs)',
+                      fontSize: '11px',
+                      fontWeight: '700',
+                      textTransform: 'uppercase',
+                      background: selectedNode.status === 'healthy' ? 'var(--emerald-bg)' : 'var(--amber-bg)',
+                      color: selectedNode.status === 'healthy' ? 'var(--emerald)' : 'var(--amber)',
+                      border: `1px solid ${selectedNode.status === 'healthy' ? 'var(--emerald-border)' : 'var(--amber-border)'}`
+                    }}>
+                      {selectedNode.status || 'healthy'}
+                    </span>
                   </div>
-                  <div className="empty-actions">
-                    <button className="btn-primary" onClick={() => setTelemetryView('all')}>
-                      <Sparkles size={14} />
-                      <span>Switch to Demo Fleet (6 Simulated Nodes)</span>
+
+                  {/* 2x2 Telemetry Grid */}
+                  <div className="inspector-metrics-grid">
+                    <div className="inspector-metric-box">
+                      <div className="inspector-metric-label">CPU LOAD</div>
+                      <div className="inspector-metric-val">{fmt(selectedNode.cpu, 1)}%</div>
+                      <div className="inspector-metric-sub">Base: {selectedNode.baseCpu || 30}%</div>
+                    </div>
+                    <div className="inspector-metric-box">
+                      <div className="inspector-metric-label">MEMORY USAGE</div>
+                      <div className="inspector-metric-val">{fmt(selectedNode.memory, 1)}%</div>
+                      <div className="inspector-metric-sub">Base: {selectedNode.baseMemory || 50}%</div>
+                    </div>
+                    <div className="inspector-metric-box">
+                      <div className="inspector-metric-label">INBOUND TRAFFIC</div>
+                      <div className="inspector-metric-val">{fmt(selectedNode.netIn, 1)} <span style={{ fontSize: '10px' }}>Mbps</span></div>
+                      <div className="inspector-metric-sub">Base: {selectedNode.baseNetIn || 15} Mbps</div>
+                    </div>
+                    <div className="inspector-metric-box">
+                      <div className="inspector-metric-label">OUTBOUND TRAFFIC</div>
+                      <div className="inspector-metric-val">{fmt(selectedNode.netOut, 1)} <span style={{ fontSize: '10px' }}>Mbps</span></div>
+                      <div className="inspector-metric-sub">Base: {selectedNode.baseNetOut || 10} Mbps</div>
+                    </div>
+                  </div>
+
+                  {/* Telemetry Stream Health */}
+                  <div className="inspector-section-label">
+                    <span>TELEMETRY SEQUENCE & FRESHNESS</span>
+                  </div>
+                  <div className="inspector-keyval-list">
+                    <div className="inspector-keyval-row">
+                      <span className="inspector-keyval-label">Monotonic Sequence</span>
+                      <span className="inspector-keyval-value">#{selectedNode.lastSeq || selectedNode.seq || 0}</span>
+                    </div>
+                    <div className="inspector-keyval-row">
+                      <span className="inspector-keyval-label">Sequence Gaps / Dropped</span>
+                      <span className="inspector-keyval-value">{selectedNode.missingSamples || 0} pkts</span>
+                    </div>
+                    <div className="inspector-keyval-row">
+                      <span className="inspector-keyval-label">Buffered Backlog</span>
+                      <span className="inspector-keyval-value">{selectedNode.bufferedSamples || 0} queued</span>
+                    </div>
+                    <div className="inspector-keyval-row">
+                      <span className="inspector-keyval-label">Last Heartbeat Seen</span>
+                      <span className="inspector-keyval-value">{timeLabel(selectedNode.lastSeen || Date.now())}</span>
+                    </div>
+                  </div>
+
+                  {/* Node Actions */}
+                  <div className="inspector-section-label">
+                    <span>FAULT INJECTION ACTIONS</span>
+                  </div>
+                  <div className="inspector-actions-row">
+                    <button
+                      className="action-btn spike"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => triggerApi('/api/anomaly/simulate', 'POST', {
+                        nodeId: selectedNode.id,
+                        metric: 'cpu',
+                        value: 78.0,
+                        durationMs: 6000
+                      }, `Spike CPU on ${selectedNode.name}`)}
+                    >
+                      <Flame size={12} />
+                      <span>Inject 78% Spike</span>
+                    </button>
+                    <button
+                      className="action-btn outage"
+                      disabled={Boolean(busyAction)}
+                      onClick={() => triggerApi('/api/agent/simulate-outage', 'POST', {
+                        nodeId: selectedNode.id,
+                        outageMs: 5000,
+                        recoveryMs: 4000
+                      }, `Simulate Outage on ${selectedNode.name}`)}
+                    >
+                      <AlertTriangle size={12} />
+                      <span>Simulate Outage</span>
                     </button>
                   </div>
                 </div>
               ) : (
-                <>
-                  {/* Perfectly Balanced 5-Column Metric Ribbon */}
-                  <div className="kpi-grid">
-                    {/* 1. Cluster Health */}
-                    <div className="kpi-card">
-                      <div className="kpi-card-header">
-                        <span className="kpi-card-title">
-                          <Wifi size={13} color="#10b981" /> Cluster Health
-                        </span>
-                        <span className="kpi-status-badge">
-                          {healthyCount === scopedNodes.length ? 'Optimal' : `${offlineCount > 0 ? `${offlineCount} Offline` : 'Degraded'}`}
-                        </span>
-                      </div>
-                      <div className="kpi-value-row">
-                        <span className="kpi-number">{healthyCount}</span>
-                        <span className="kpi-unit">/ {scopedNodes.length} online</span>
-                      </div>
-                      <div className="kpi-progress-track">
-                        <div
-                          className="kpi-progress-fill"
-                          style={{
-                            width: `${Math.round((healthyCount / Math.max(1, scopedNodes.length)) * 100)}%`,
-                            background: healthyCount === scopedNodes.length ? '#10b981' : '#f59e0b'
-                          }}
-                        />
-                      </div>
-                      <div className="kpi-subtext">
-                        <span>{Math.round((healthyCount / Math.max(1, scopedNodes.length)) * 100)}% operational</span>
-                        {staleCount > 0 && <span style={{ color: '#f59e0b' }}>{staleCount} stale</span>}
-                      </div>
-                    </div>
-
-                {/* 2. Fleet CPU */}
-                <div className="kpi-card">
-                  <div className="kpi-card-header">
-                    <span className="kpi-card-title">
-                      <Cpu size={13} color="#6366f1" /> Average CPU
-                    </span>
-                    <span className="kpi-status-badge">
-                      {avgCpu > 75 ? 'High Load' : 'Normal'}
-                    </span>
-                  </div>
-                  <div className="kpi-value-row">
-                    <span className="kpi-number">{fmt(avgCpu, 1)}</span>
-                    <span className="kpi-unit">%</span>
-                  </div>
-                  <div className="kpi-progress-track">
-                    <div
-                      className="kpi-progress-fill"
-                      style={{
-                        width: `${Math.min(avgCpu, 100)}%`,
-                        background: avgCpu > 75 ? '#e11d48' : avgCpu > 50 ? '#f59e0b' : '#6366f1'
-                      }}
-                    />
-                  </div>
-                  <div className="kpi-subtext">
-                    <span>Baseline: ~34%</span>
-                    <span>6 active nodes</span>
-                  </div>
+                <div style={{ textAlign: 'center', padding: '30px 10px', color: 'var(--text-muted)' }}>
+                  Select a node from the fleet table to inspect its live telemetry and run diagnostics.
                 </div>
+              )
+            )}
 
-                {/* 3. Memory Allocation */}
-                <div className="kpi-card">
-                  <div className="kpi-card-header">
-                    <span className="kpi-card-title">
-                      <Activity size={13} color="#0284c7" /> Memory Pool
-                    </span>
-                    <span className="kpi-status-badge">Allocated</span>
-                  </div>
-                  <div className="kpi-value-row">
-                    <span className="kpi-number">{fmt(avgMem, 1)}</span>
-                    <span className="kpi-unit">%</span>
-                  </div>
-                  <div className="kpi-progress-track">
-                    <div
-                      className="kpi-progress-fill"
-                      style={{ width: `${Math.min(avgMem, 100)}%`, background: '#0284c7' }}
-                    />
-                  </div>
-                  <div className="kpi-subtext">
-                    <span>Stable cluster footprint</span>
-                  </div>
-                </div>
-
-                {/* 4. Network Inbound */}
-                <div className="kpi-card">
-                  <div className="kpi-card-header">
-                    <span className="kpi-card-title">
-                      <ArrowDownLeft size={13} color="#10b981" /> Inbound Traffic
-                    </span>
-                    <span className="kpi-status-badge">Live</span>
-                  </div>
-                  <div className="kpi-value-row">
-                    <span className="kpi-number">{fmt(totalIn, 1)}</span>
-                    <span className="kpi-unit">Mbps</span>
-                  </div>
-                  <div className="kpi-progress-track">
-                    <div
-                      className="kpi-progress-fill"
-                      style={{ width: `${Math.min(totalIn / 3, 100)}%`, background: '#10b981' }}
-                    />
-                  </div>
-                  <div className="kpi-subtext">
-                    <span>300 Mbps bandwidth cap</span>
-                  </div>
-                </div>
-
-                {/* 5. Network Outbound */}
-                <div className="kpi-card">
-                  <div className="kpi-card-header">
-                    <span className="kpi-card-title">
-                      <ArrowUpRight size={13} color="#f59e0b" /> Outbound Traffic
-                    </span>
-                    <span className="kpi-status-badge">Egress</span>
-                  </div>
-                  <div className="kpi-value-row">
-                    <span className="kpi-number">{fmt(totalOut, 1)}</span>
-                    <span className="kpi-unit">Mbps</span>
-                  </div>
-                  <div className="kpi-progress-track">
-                    <div
-                      className="kpi-progress-fill"
-                      style={{ width: `${Math.min(totalOut / 3, 100)}%`, background: '#f59e0b' }}
-                    />
-                  </div>
-                  <div className="kpi-subtext">
-                    <span>Normal outbound stream</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Real-Time Telemetry Charts Grid */}
-              <div className="charts-grid">
-                {/* Compute & Memory Usage */}
-                <div className="chart-card">
-                  <div className="chart-card-header">
-                    <div className="chart-title-group">
-                      <span className="chart-title">Resource Utilization History</span>
-                      <span className="chart-description">Aggregate CPU and memory usage over rolling time window</span>
-                    </div>
-                    <div className="chart-header-actions">
-                      <div className="chart-legend">
-                        <span className="legend-item">
-                          <span className="legend-dot" style={{ background: '#4f46e5' }} /> CPU
-                        </span>
-                        <span className="legend-item">
-                          <span className="legend-dot" style={{ background: '#0ea5e9' }} /> Memory
-                        </span>
-                      </div>
-                      <div className="time-segmented-control">
-                        {['1m', '5m', '15m'].map(r => (
-                          <button
-                            key={r}
-                            className={`time-pill-btn ${range === r ? 'active' : ''}`}
-                            onClick={() => setRange(r)}
-                          >
-                            {r}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="chart-wrapper">
-                    <Line data={cpuChartData} options={makeChartOpts('%', 100)} />
-                  </div>
-                </div>
-
-                {/* Network Throughput */}
-                <div className="chart-card">
-                  <div className="chart-card-header">
-                    <div className="chart-title-group">
-                      <span className="chart-title">Network Bandwidth</span>
-                      <span className="chart-description">Real-time comparison of inbound ingress vs outbound egress</span>
-                    </div>
-                    <div className="chart-header-actions">
-                      <div className="chart-legend">
-                        <span className="legend-item">
-                          <span className="legend-dot" style={{ background: '#0284c7' }} /> Ingress
-                        </span>
-                        <span className="legend-item">
-                          <span className="legend-dot" style={{ background: '#d97706' }} /> Egress
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="chart-wrapper">
-                    <Line data={netChartData} options={makeChartOpts(' Mbps', 300)} />
-                  </div>
-                </div>
-              </div>
-
-              {/* Fleet Nodes Section */}
-              <div className="fleet-card">
-                <div className="fleet-card-header">
-                  <div className="fleet-header-left">
-                    <span className="fleet-title">Server Fleet</span>
-                    <span className="fleet-count-chip">{filteredNodes.length} of {nodes.length} nodes</span>
-                  </div>
-
-                  <div className="fleet-header-filters">
-                    {/* Status filter tabs */}
-                    <div className="status-filter-pills">
-                      <button
-                        className={`status-pill-btn ${statusFilter === 'All' ? 'active' : ''}`}
-                        onClick={() => setStatusFilter('All')}
-                      >
-                        All ({nodes.length})
-                      </button>
-                      <button
-                        className={`status-pill-btn ${statusFilter === 'healthy' ? 'active' : ''}`}
-                        onClick={() => setStatusFilter('healthy')}
-                      >
-                        Healthy ({healthyCount})
-                      </button>
-                      {offlineCount > 0 && (
-                        <button
-                          className={`status-pill-btn ${statusFilter === 'offline' ? 'active' : ''}`}
-                          onClick={() => setStatusFilter('offline')}
-                        >
-                          Offline ({offlineCount})
-                        </button>
-                      )}
-                    </div>
-
-                    {/* Region select */}
-                    <select
-                      className="select-filter"
-                      value={regionFilter}
-                      onChange={e => setRegionFilter(e.target.value)}
+            {/* ── TAB 2: ANOMALY RADAR ── */}
+            {activeDeckTab === 'radar' && (
+              <div>
+                <div className="inspector-section-label">
+                  <span>ACTIVE BASELINE ANOMALIES ({activeIncidents.length})</span>
+                  {activeIncidents.length > 0 && (
+                    <button
+                      style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '10px' }}
+                      onClick={clearAnomalies}
                     >
-                      <option value="All">All Regions</option>
-                      <option value="us-east-1">us-east-1 (N. Virginia)</option>
-                      <option value="eu-west-1">eu-west-1 (Ireland)</option>
-                      <option value="ap-south-1">ap-south-1 (Mumbai)</option>
-                    </select>
-
-                    {/* Role select */}
-                    <select
-                      className="select-filter"
-                      value={roleFilter}
-                      onChange={e => setRoleFilter(e.target.value)}
-                    >
-                      <option value="All">All Server Roles</option>
-                      <option value="API">API Gateway</option>
-                      <option value="Worker">Worker Node</option>
-                      <option value="Database">Database Primary</option>
-                      <option value="Cache">Redis Cache</option>
-                    </select>
-
-                    {/* Prune offline test nodes if any offline exist */}
-                    {offlineCount > 0 && (
-                      <button
-                        className="btn-secondary"
-                        onClick={handlePruneOfflineNodes}
-                        disabled={Boolean(busyAction)}
-                        title="Remove disconnected test agents that are no longer reporting"
-                      >
-                        <Trash2 size={13} />
-                        <span>Prune Offline ({offlineCount})</span>
-                      </button>
-                    )}
-
-                    {/* View mode toggle */}
-                    <div className="view-toggle">
-                      <button
-                        className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`}
-                        onClick={() => setViewMode('grid')}
-                        title="Card Grid View"
-                      >
-                        <LayoutGrid size={14} />
-                      </button>
-                      <button
-                        className={`view-btn ${viewMode === 'table' ? 'active' : ''}`}
-                        onClick={() => setViewMode('table')}
-                        title="Structured Table View"
-                      >
-                        <List size={14} />
-                      </button>
-                    </div>
-                  </div>
+                      Clear All
+                    </button>
+                  )}
                 </div>
 
-                {/* View 1: Card Grid */}
-                {viewMode === 'grid' ? (
-                  <div className="node-grid">
-                    {filteredNodes.map(node => {
-                      const hasAlert = activeIncidents.some(i => i.nodeId === node.id);
-                      return (
-                        <div
-                          key={node.id}
-                          className={`node-tile ${hasAlert ? 'anomaly-ring' : ''}`}
-                          onClick={() => setSelectedNode(node)}
-                        >
-                          <div className="node-tile-top">
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                              <span className="role-badge">
-                                {node.role === 'Database' && <Database size={12} color="#f59e0b" />}
-                                {node.role === 'Cache' && <Box size={12} color="#0284c7" />}
-                                {node.role === 'API' && <Globe2 size={12} color="#6366f1" />}
-                                {node.role === 'Worker' && <Server size={12} color="#10b981" />}
-                                <span>{node.role}</span>
-                              </span>
-                              {node.source === 'agent' && !node.isSimulated ? (
-                                <span className="source-tag-badge live">
-                                  <Radio size={9} /> Live
-                                </span>
-                              ) : (
-                                <span className="source-tag-badge sim">
-                                  <Bot size={9} /> Demo
-                                </span>
-                              )}
-                            </div>
-
-                            <span className={`status-badge ${node.status || 'healthy'}`}>
-                              <span style={{
-                                width: 6,
-                                height: 6,
-                                borderRadius: '50%',
-                                background: 'currentColor',
-                                display: 'inline-block'
-                              }} />
-                              <span>{node.status || 'healthy'}</span>
-                            </span>
-                          </div>
-
-                          <div className="node-tile-info">
-                            <span className="node-tile-hostname">{node.name}</span>
-                            <div className="node-tile-meta">
-                              <span className="node-ip-tag">{node.ip}</span>
-                              <span>&bull;</span>
-                              <span>{renderRegion(node.region)}</span>
-                            </div>
-                          </div>
-
-                          <div className="node-tile-gauges">
-                            {/* CPU */}
-                            <div className="gauge-row">
-                              <div className="gauge-label-row">
-                                <span>CPU Load</span>
-                                <span className="gauge-pct">{fmt(node.cpu, 1)}%</span>
-                              </div>
-                              <div className="gauge-track">
-                                <div
-                                  className="gauge-fill"
-                                  style={{
-                                    width: `${Math.min(node.cpu, 100)}%`,
-                                    background: node.cpu > 75 ? '#e11d48' : node.cpu > 50 ? '#f59e0b' : '#4f46e5'
-                                  }}
-                                />
-                              </div>
-                            </div>
-
-                            {/* Memory */}
-                            <div className="gauge-row">
-                              <div className="gauge-label-row">
-                                <span>Memory</span>
-                                <span className="gauge-pct">{fmt(node.memory, 1)}%</span>
-                              </div>
-                              <div className="gauge-track">
-                                <div
-                                  className="gauge-fill"
-                                  style={{
-                                    width: `${Math.min(node.memory, 100)}%`,
-                                    background: '#0284c7'
-                                  }}
-                                />
-                              </div>
-                            </div>
-
-                            {/* Network In / Out */}
-                            <div className="node-tile-net-row">
-                              <span>Network</span>
-                              <span>
-                                In: <b className="net-metric-val">{fmt(node.netIn, 1)}</b> Mbps &bull; Out: <b className="net-metric-val">{fmt(node.netOut, 1)}</b> Mbps
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="node-tile-footer">
-                            <span>
-                              {node.status === 'offline' ? 'Disconnected' : 'Telemetry streaming'}
-                            </span>
-                            <span className="inspect-link">
-                              Inspect <ArrowRight size={12} />
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
+                {activeIncidents.length === 0 ? (
+                  <div className="anomaly-empty-state">
+                    <div className="empty-state-icon">
+                      <ShieldCheck size={20} />
+                    </div>
+                    <div className="empty-state-title">All Systems Nominal</div>
+                    <div className="empty-state-desc">
+                      Rolling baseline Z-scores are within safe statistical bounds (&plusmn;2.5&sigma;).
+                    </div>
                   </div>
                 ) : (
-                  /* View 2: Structured Data Table */
-                  <div className="table-container">
-                    <table className="node-table">
-                      <thead>
-                        <tr>
-                          <th>Server Node</th>
-                          <th>Role</th>
-                          <th>Region</th>
-                          <th>IP Address</th>
-                          <th>CPU Load</th>
-                          <th>Memory</th>
-                          <th>Bandwidth (In / Out)</th>
-                          <th>Status</th>
-                          <th>Action</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredNodes.map(node => (
-                          <tr key={node.id}>
-                            <td>
-                              <div className="table-node-name">{node.name}</div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                                <span style={{ fontSize: 11, color: '#64748b' }}>ID: {node.id}</span>
-                                {node.source === 'agent' && !node.isSimulated ? (
-                                  <span className="source-tag-badge live" style={{ padding: '1px 5px', fontSize: 9 }}>
-                                    <Radio size={8} /> Live
-                                  </span>
-                                ) : (
-                                  <span className="source-tag-badge sim" style={{ padding: '1px 5px', fontSize: 9 }}>
-                                    <Bot size={8} /> Sim
-                                  </span>
-                                )}
-                              </div>
-                            </td>
-                            <td>
-                              <span className="role-badge">{node.role}</span>
-                            </td>
-                            <td>{renderRegion(node.region)}</td>
-                            <td style={{ fontFamily: 'JetBrains Mono', fontSize: 12 }}>{node.ip}</td>
-                            <td>
-                              <div className="table-bar-cell">
-                                <div className="gauge-track" style={{ flex: 1 }}>
-                                  <div
-                                    className="gauge-fill"
-                                    style={{
-                                      width: `${Math.min(node.cpu, 100)}%`,
-                                      background: node.cpu > 75 ? '#e11d48' : '#4f46e5'
-                                    }}
-                                  />
-                                </div>
-                                <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11.5, minWidth: 42 }}>
-                                  {fmt(node.cpu, 1)}%
-                                </span>
-                              </div>
-                            </td>
-                            <td>
-                              <div className="table-bar-cell">
-                                <div className="gauge-track" style={{ flex: 1 }}>
-                                  <div
-                                    className="gauge-fill"
-                                    style={{ width: `${Math.min(node.memory, 100)}%`, background: '#0284c7' }}
-                                  />
-                                </div>
-                                <span style={{ fontFamily: 'JetBrains Mono', fontSize: 11.5, minWidth: 42 }}>
-                                  {fmt(node.memory, 1)}%
-                                </span>
-                              </div>
-                            </td>
-                            <td style={{ fontFamily: 'JetBrains Mono', fontSize: 12 }}>
-                              <span style={{ color: '#0284c7' }}>{fmt(node.netIn, 1)}</span> / <span style={{ color: '#d97706' }}>{fmt(node.netOut, 1)}</span> <span style={{ fontSize: 10, color: '#64748b' }}>Mbps</span>
-                            </td>
-                            <td>
-                              <span className={`status-badge ${node.status || 'healthy'}`}>
-                                {node.status || 'healthy'}
-                              </span>
-                            </td>
-                            <td>
-                              <button
-                                className="btn-secondary"
-                                style={{ padding: '4px 9px', fontSize: 11.5 }}
-                                onClick={() => setSelectedNode(node)}
-                              >
-                                View
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  activeIncidents.map(inc => (
+                    <div key={inc.id} className="anomaly-item-card">
+                      <div className="anomaly-item-top">
+                        <span className="anomaly-item-title">{inc.nodeName}</span>
+                        <span className="z-score-tag">+{fmt(inc.peakZ, 1)}&sigma;</span>
+                      </div>
+                      <div className="anomaly-item-desc">
+                        Sudden spike on <b>{inc.label}</b>: current <b>{fmt(inc.currentValue, 1)}{inc.unit}</b> vs rolling baseline &mu;={fmt(inc.baselineMean, 1)}{inc.unit} (&sigma;={fmt(inc.baselineSd, 1)}).
+                      </div>
+                      <div className="anomaly-item-footer">
+                        <span>Observed {inc.count} consecutive ticks</span>
+                        <button
+                          style={{ border: 'none', background: 'transparent', color: 'var(--indigo)', cursor: 'pointer', fontSize: '10.5px', fontWeight: '600' }}
+                          onClick={() => dismissAnomaly(inc.id)}
+                        >
+                          Acknowledge
+                        </button>
+                      </div>
+                    </div>
+                  ))
                 )}
               </div>
-            </>
-          )}
-        </>
-      )}
+            )}
 
-          {/* ══════════════ TAB 2: ANOMALY RADAR ══════════════ */}
-          {activeTab === 'anomalies' && (
-            <div className="tab-view-container">
-              <div className="section-hero-card">
-                <div className="hero-left">
-                  <div className="hero-icon-box">
-                    <ShieldAlert size={22} />
-                  </div>
-                  <div>
-                    <div className="hero-title">Automated Anomaly Detection</div>
-                    <div className="hero-description">
-                      Continuously calculates dynamic baseline averages and standard deviations across rolling telemetry samples. Instantly flags unexpected CPU spikes or network surges without manual thresholding.
+            {/* ── TAB 3: CHAOS LAB CONTROLS ── */}
+            {activeDeckTab === 'lab' && (
+              <div>
+                <div className="inspector-section-label">
+                  <span>ON-DEMAND RELIABILITY TESTS</span>
+                </div>
+
+                <div className="chaos-lab-block">
+                  <button
+                    className="chaos-lab-btn"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => triggerApi('/api/anomaly/simulate', 'POST', {
+                      nodeId: 'node-01',
+                      metric: 'cpu',
+                      value: 78.0,
+                      durationMs: 5000
+                    }, 'Controlled CPU Spike (+47% load)')}
+                  >
+                    <div className="chaos-btn-left">
+                      <Flame size={13} color="#f59e0b" />
+                      <span>Inject CPU Spike (Node 01 &rarr; 78%)</span>
                     </div>
-                  </div>
-                </div>
+                    <ArrowRight size={11} color="var(--text-muted)" />
+                  </button>
 
-                <button
-                  className="btn-primary"
-                  disabled={Boolean(busyAction)}
-                  onClick={() => handleChaosAction('spike', 'CPU Surge Simulation', '/api/anomaly/simulate', { nodeId: 'node-01', metric: 'cpu', value: 78, durationMs: 9000 })}
-                >
-                  <Zap size={14} />
-                  <span>Simulate Test Spike</span>
-                </button>
-              </div>
-
-              {activeIncidents.length === 0 ? (
-                <div className="empty-state-card">
-                  <div className="empty-state-icon">
-                    <CheckCircle2 size={24} />
-                  </div>
-                  <div className="empty-state-heading">All Systems Operating Normally</div>
-                  <div className="empty-state-text">
-                    All {nodes.length} nodes are currently reporting metrics within their expected baseline ranges. No anomalies or unusual traffic patterns detected.
-                  </div>
-                </div>
-              ) : (
-                <div className="incidents-list">
-                  {activeIncidents.map(inc => {
-                    const targetNode = nodes.find(n => n.id === inc.nodeId);
-                    const isLive = targetNode?.source === 'agent' && !targetNode?.isSimulated;
-                    return (
-                    <div key={inc.id} className="incident-card">
-                      <div className="incident-left">
-                        <div className="incident-meta-row">
-                          <span className="incident-badge">{inc.severity} Severity</span>
-                          {isLive ? (
-                            <span className="source-tag-badge live" style={{ fontSize: 10, padding: '1px 6px' }}>
-                              <Radio size={9} /> Live Agent
-                            </span>
-                          ) : (
-                            <span className="source-tag-badge sim" style={{ fontSize: 10, padding: '1px 6px' }}>
-                              <Bot size={9} /> Simulated Demo
-                            </span>
-                          )}
-                          <span style={{ fontSize: 12, color: '#94a3b8' }}>
-                            Deviation: <b>+{inc.zScore.toFixed(1)}&sigma; above average</b>
-                          </span>
-                        </div>
-                        <div className="incident-node-title">
-                          {inc.nodeName} &bull; {inc.label}
-                        </div>
-                        <div className="incident-details">
-                          Observed value: <b style={{ color: '#ffffff' }}>{fmt(inc.currentVal, 1)}{inc.unit}</b> &mdash; Normal baseline expectation: <b style={{ color: '#94a3b8' }}>{fmt(inc.baselineMean, 1)}{inc.unit}</b>
-                        </div>
-                      </div>
-
-                      <button
-                        className="btn-secondary"
-                        onClick={handleResetFaults}
-                        disabled={Boolean(busyAction)}
-                      >
-                        <RefreshCw size={12} />
-                        <span>Reset Baseline</span>
-                      </button>
+                  <button
+                    className="chaos-lab-btn"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => triggerApi('/api/anomaly/simulate', 'POST', {
+                      nodeId: 'node-01',
+                      metric: 'netIn',
+                      value: 85.0,
+                      durationMs: 5000
+                    }, 'Network Ingestion Flood (85 Mbps)')}
+                  >
+                    <div className="chaos-btn-left">
+                      <Zap size={13} color="#06b6d4" />
+                      <span>Inject Network Flood (85 Mbps)</span>
                     </div>
-                  );
-                })}
-                </div>
-              )}
-            </div>
-          )}
+                    <ArrowRight size={11} color="var(--text-muted)" />
+                  </button>
 
-          {/* ══════════════ TAB 3: RELIABILITY & STRESS LAB ══════════════ */}
-          {activeTab === 'chaos_lab' && (
-            <div className="tab-view-container">
-              <div className="section-hero-card">
-                <div className="hero-left">
-                  <div className="hero-icon-box">
-                    <FlaskConical size={22} />
-                  </div>
-                  <div>
-                    <div className="hero-title">Reliability &amp; Stress Testing Lab</div>
-                    <div className="hero-description">
-                      Execute controlled real-world scenarios to verify ServerSight's resilience. Test how the pipeline gracefully handles agent dropouts, packet delay backpressures, and traffic bursts.
+                  <button
+                    className="chaos-lab-btn"
+                    disabled={Boolean(busyAction)}
+                    onClick={() => triggerApi('/api/fault/delay-packets', 'POST', {
+                      delayMs: 350,
+                      durationMs: 5000
+                    }, 'Transport Jitter Delay (350ms)')}
+                  >
+                    <div className="chaos-btn-left">
+                      <Clock size={13} color="#8b5cf6" />
+                      <span>Inject Transport Delay (350ms Jitter)</span>
                     </div>
-                  </div>
-                </div>
-
-                <button
-                  className="btn-secondary"
-                  onClick={handleResetFaults}
-                  disabled={Boolean(busyAction)}
-                >
-                  <RefreshCw size={13} />
-                  <span>Reset All Tests</span>
-                </button>
-              </div>
-
-              {/* Performance Telemetry Strip */}
-              <div className="lab-telemetry-strip">
-                <div className="lab-metric-chip">
-                  <span className="chip-label">Server Heap:</span>
-                  <span className="chip-value">{benchmarkStats?.memory?.heapUsedMb || '12.4'} MB</span>
-                </div>
-                <div className="lab-metric-chip">
-                  <span className="chip-label">RSS Memory:</span>
-                  <span className="chip-value">{benchmarkStats?.memory?.rssMb || '48.2'} MB</span>
-                </div>
-                <div className="lab-metric-chip">
-                  <span className="chip-label">Telemetry Ingests:</span>
-                  <span className="chip-value">{benchmarkStats?.totalIngests || 0}</span>
-                </div>
-                <div className="lab-metric-chip">
-                  <span className="chip-label">p95 Latency:</span>
-                  <span className="chip-value" style={{ color: '#10b981' }}>11 ms</span>
-                </div>
-                <div className="lab-metric-chip">
-                  <span className="chip-label">Dropped Packets:</span>
-                  <span className="chip-value">{benchmarkStats?.backpressureDrops || 0}</span>
-                </div>
-              </div>
-
-              {/* Scenario Cards */}
-              <div className="scenarios-grid">
-                {/* 1. Agent Crash */}
-                <div className="scenario-card">
-                  <div className="scenario-header">
-                    <Flame size={18} color="#fb7185" />
-                    <span className="scenario-type-tag">Agent Lifecycle</span>
-                  </div>
-                  <div className="scenario-title">Simulate Node Disconnect / Crash</div>
-                  <div className="scenario-description">
-                    Halts heartbeats on <b>api-prod-us-east-1a</b>. Demonstrates automatic status transition from Healthy &rarr; Stale (&gt;3.5s) &rarr; Offline (&gt;9s), followed by buffer replay when reconnected.
-                  </div>
-                  <button
-                    className="scenario-run-btn crash"
-                    disabled={Boolean(busyAction)}
-                    onClick={() => handleChaosAction('crash', 'Agent Disconnect', '/api/agent/simulate-crash', { nodeId: 'node-01', crashDurationMs: 10000 })}
-                  >
-                    Trigger Disconnect
+                    <ArrowRight size={11} color="var(--text-muted)" />
                   </button>
-                </div>
 
-                {/* 2. Network Latency & Jitter */}
-                <div className="scenario-card">
-                  <div className="scenario-header">
-                    <Clock size={18} color="#fbbf24" />
-                    <span className="scenario-type-tag">Transport Lag</span>
-                  </div>
-                  <div className="scenario-title">Inject Network Latency (600ms)</div>
-                  <div className="scenario-description">
-                    Injects artificial 600ms latency on the telemetry ingest pipeline. Proves the local ring buffer queues samples without losing data or blocking dashboard rendering.
-                  </div>
                   <button
-                    className="scenario-run-btn jitter"
+                    className="chaos-lab-btn"
                     disabled={Boolean(busyAction)}
-                    onClick={() => handleChaosAction('delay', '600ms Network Delay', '/api/fault/delay-packets', { delayMs: 600, durationMs: 7000 })}
+                    onClick={() => triggerApi('/api/agent/simulate-crash', 'POST', {
+                      nodeId: 'node-03',
+                      crashDurationMs: 6000
+                    }, 'Simulate Agent Crash on node-03')}
                   >
-                    Inject 600ms Delay
+                    <div className="chaos-btn-left">
+                      <AlertTriangle size={13} color="#ef4444" />
+                      <span>Simulate Crash & Gap (Node 03)</span>
+                    </div>
+                    <ArrowRight size={11} color="var(--text-muted)" />
                   </button>
-                </div>
 
-                {/* 3. CPU Spike */}
-                <div className="scenario-card">
-                  <div className="scenario-header">
-                    <Zap size={18} color="#818cf8" />
-                    <span className="scenario-type-tag">Resource Surge</span>
-                  </div>
-                  <div className="scenario-title">Inject CPU Anomaly (+47%)</div>
-                  <div className="scenario-description">
-                    Forces a 78% CPU surge on <b>api-prod-us-east-1a</b>. Tests the anomaly detector's ability to identify statistical outliers and display an immediate alert banner.
-                  </div>
                   <button
-                    className="scenario-run-btn spike"
+                    className="chaos-reset-btn"
                     disabled={Boolean(busyAction)}
-                    onClick={() => handleChaosAction('cpu', 'CPU Anomaly Spike', '/api/anomaly/simulate', { nodeId: 'node-01', metric: 'cpu', value: 78, durationMs: 8000 })}
+                    onClick={() => triggerApi('/api/faults/reset', 'POST', null, 'Reset All Faults & Restore Fleet')}
                   >
-                    Inject CPU Spike
-                  </button>
-                </div>
-
-                {/* 4. Traffic Surge */}
-                <div className="scenario-card">
-                  <div className="scenario-header">
-                    <Activity size={18} color="#38bdf8" />
-                    <span className="scenario-type-tag">Bandwidth Surge</span>
-                  </div>
-                  <div className="scenario-title">Inject Traffic Burst (+77 Mbps)</div>
-                  <div className="scenario-description">
-                    Sends an 85 Mbps network flood to <b>cache-prod-ap-south-1</b>. Demonstrates smooth 60fps chart rendering and backpressure protection without memory leaks.
-                  </div>
-                  <button
-                    className="scenario-run-btn flood"
-                    disabled={Boolean(busyAction)}
-                    onClick={() => handleChaosAction('net', 'Network Flood', '/api/anomaly/simulate', { nodeId: 'node-05', metric: 'netIn', value: 85, durationMs: 8000 })}
-                  >
-                    Inject Network Surge
+                    <RefreshCw size={12} />
+                    <span>Restore Fleet to Nominal Health</span>
                   </button>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        </aside>
       </main>
 
-      {/* ─── Node Inspector Modal ─── */}
-      {selectedNode && (
-        <div className="modal-overlay" onClick={() => setSelectedNode(null)}>
-          <div className="modal-dialog" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <div className="modal-title-group">
-                <Server size={18} color="#4f46e5" />
-                <span className="modal-title">{selectedNode.name}</span>
-              </div>
-              <button className="modal-close-btn" onClick={() => setSelectedNode(null)}>
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="modal-body">
-              <div className="info-grid">
-                <div className="info-item">
-                  <span className="info-item-label">Server Role</span>
-                  <span className="info-item-value">{selectedNode.role}</span>
-                </div>
-                <div className="info-item">
-                  <span className="info-item-label">Region</span>
-                  <span className="info-item-value">{renderRegion(selectedNode.region)}</span>
-                </div>
-                <div className="info-item">
-                  <span className="info-item-label">Internal IP</span>
-                  <span className="info-item-value" style={{ fontFamily: 'JetBrains Mono' }}>{selectedNode.ip}</span>
-                </div>
-                <div className="info-item">
-                  <span className="info-item-label">Current Status</span>
-                  <span className="info-item-value">
-                    <span className={`status-badge ${selectedNode.status || 'healthy'}`}>
-                      {selectedNode.status || 'healthy'}
-                    </span>
-                  </span>
-                </div>
-                <div className="info-item" style={{ gridColumn: 'span 2' }}>
-                  <span className="info-item-label">Telemetry Source & Origin</span>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-                    {selectedNode.source === 'agent' && !selectedNode.isSimulated ? (
-                      <span className="source-tag-badge live" style={{ fontSize: 11, padding: '3px 8px' }}>
-                        <Radio size={11} /> Live Host Agent &bull; Verified Telemetry (/proc & OS counters)
-                      </span>
-                    ) : (
-                      <span className="source-tag-badge sim" style={{ fontSize: 11, padding: '3px 8px' }}>
-                        <Bot size={11} /> Synthetic Demonstration Server &bull; Harmonic Simulation
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div className="gauge-row">
-                  <div className="gauge-label-row">
-                    <span>CPU Utilization</span>
-                    <span className="gauge-pct">{fmt(selectedNode.cpu, 1)}%</span>
-                  </div>
-                  <div className="gauge-track">
-                    <div
-                      className="gauge-fill"
-                      style={{
-                        width: `${Math.min(selectedNode.cpu, 100)}%`,
-                        background: selectedNode.cpu > 75 ? '#e11d48' : '#4f46e5'
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div className="gauge-row">
-                  <div className="gauge-label-row">
-                    <span>Memory Allocation</span>
-                    <span className="gauge-pct">{fmt(selectedNode.memory, 1)}%</span>
-                  </div>
-                  <div className="gauge-track">
-                    <div
-                      className="gauge-fill"
-                      style={{ width: `${Math.min(selectedNode.memory, 100)}%`, background: '#0284c7' }}
-                    />
-                  </div>
-                </div>
-
-                <div className="gauge-row">
-                  <div className="gauge-label-row">
-                    <span>Network Bandwidth</span>
-                    <span className="gauge-pct">
-                      In: {fmt(selectedNode.netIn, 1)} Mbps &bull; Out: {fmt(selectedNode.netOut, 1)} Mbps
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="modal-actions">
-              <button
-                className="btn-secondary"
-                onClick={() => handleChaosAction('node-spike', `CPU Spike on ${selectedNode.name}`, '/api/anomaly/simulate', { nodeId: selectedNode.id, metric: 'cpu', value: 82, durationMs: 8000 })}
-              >
-                <Zap size={13} />
-                <span>Simulate CPU Spike</span>
-              </button>
-              <button
-                className="btn-primary"
-                onClick={() => setSelectedNode(null)}
-              >
-                Close
-              </button>
-            </div>
-          </div>
+      {/* Floating Status Notification Toast */}
+      {toastMessage && (
+        <div className="toast-bar">
+          <Activity size={13} color="#6366f1" />
+          <span>{toastMessage}</span>
         </div>
       )}
     </div>
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+const root = createRoot(document.getElementById('root'));
+root.render(<App />);
