@@ -4,6 +4,22 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 const app = express();
 app.use(express.json({ limit: '32kb' }));
+
+// ─── Cross-Origin Resource Sharing (CORS) ─────────────────────────────────────
+// Enables separately hosted dashboards (e.g. Vercel, Netlify, custom domains)
+// to communicate with the ServerSight backend API securely.
+app.use((req, res, next) => {
+  const origin = req.headers.origin || '*';
+  res.header('Access-Control-Allow-Origin', origin);
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-agent-token, x-admin-token');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 const PORT = Number(process.env.PORT || 4000);

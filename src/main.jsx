@@ -7,8 +7,12 @@ import {
   TrendingDown, TrendingUp, X, Wifi, Zap, RefreshCw,
   FlaskConical, Clock, Flame, LayoutGrid, List, HardDrive,
   Layers, Terminal, Radio, Info, Trash2, ArrowRight, Bot, Sparkles,
-  Sun, Moon, ShieldCheck, Filter
+  Sun, Moon, ShieldCheck, Filter, Settings, Key, Eye, EyeOff, Lock
 } from 'lucide-react';
+import {
+  getWsUrl, buildApiUrl, getAdminToken, setAdminToken,
+  clearAdminToken, getApiBaseUrl, saveCustomEndpoints
+} from './config';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, PointElement,
   LineElement, Filler, Tooltip
@@ -279,6 +283,20 @@ export function App() {
   const [activeDeckTab, setActiveDeckTab] = useState('inspector');
   const [selectedNode, setSelectedNode] = useState(null);
 
+  // Dynamic Endpoints & Authentication Modals State
+  const [endpointVersion, setEndpointVersion] = useState(0);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null);
+  const [hasAdminToken, setHasAdminToken] = useState(() => Boolean(getAdminToken()));
+  const [authModalToken, setAuthModalToken] = useState('');
+  const [showTokenPlain, setShowTokenPlain] = useState(false);
+
+  // Settings form fields
+  const [cfgApiUrl, setCfgApiUrl] = useState(() => getApiBaseUrl());
+  const [cfgWsUrl, setCfgWsUrl] = useState(() => getWsUrl());
+  const [cfgAdminToken, setCfgAdminToken] = useState(() => getAdminToken() || '');
+
   // Status Notification Toast
   const [toastMessage, setToastMessage] = useState('');
   const [busyAction, setBusyAction] = useState(null);
@@ -293,15 +311,20 @@ export function App() {
     setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
   };
 
-  // WebSocket connection & 4 Hz live stream
+  // WebSocket connection & 4 Hz live stream using dynamic endpoint resolution
   useEffect(() => {
     let ws = null;
     let timer = null;
 
     const connect = () => {
-      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const host = window.location.hostname || 'localhost';
-      ws = new WebSocket(`${proto}//${host}:4000/ws`);
+      const resolvedWsUrl = getWsUrl();
+      try {
+        ws = new WebSocket(resolvedWsUrl);
+      } catch (e) {
+        console.error('[WebSocket Init Error]', e);
+        timer = setTimeout(connect, 3000);
+        return;
+      }
 
       ws.onopen = () => setConnected(true);
       ws.onclose = () => {
@@ -338,7 +361,7 @@ export function App() {
       if (ws) ws.close();
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [endpointVersion]);
 
   // Flush chart buffer at 1 Hz for smooth canvas rendering
   useEffect(() => {
@@ -397,19 +420,33 @@ export function App() {
   const totalNetIn = scopedNodes.reduce((acc, n) => acc + (n.netIn || 0), 0);
   const totalNetOut = scopedNodes.reduce((acc, n) => acc + (n.netOut || 0), 0);
 
-  // Helper to trigger API actions
-  const triggerApi = async (url, method = 'POST', body = null, desc = '') => {
+  // Helper to trigger API actions dynamically without hardcoded URLs or tokens
+  const triggerApi = async (urlPath, method = 'POST', body = null, desc = '') => {
     setBusyAction(desc);
     setToastMessage(`Executing: ${desc}...`);
     try {
-      const res = await fetch(url, {
+      const fullUrl = buildApiUrl(urlPath);
+      const headers = { 'Content-Type': 'application/json' };
+      const currentToken = getAdminToken();
+      if (currentToken) {
+        headers['Authorization'] = `Bearer ${currentToken}`;
+        headers['x-admin-token'] = currentToken;
+      }
+
+      const res = await fetch(fullUrl, {
         method,
-        headers: {
-          'Content-Type': 'application/json',
-          'x-admin-token': 'serversight-admin-secret-token'
-        },
+        headers,
         body: body ? JSON.stringify(body) : undefined
       });
+
+      if (res.status === 401 || res.status === 403) {
+        setPendingAction({ urlPath, method, body, desc });
+        setAuthModalToken('');
+        setShowAuthModal(true);
+        setToastMessage(`⚠️ Admin token required to execute: ${desc}`);
+        return null;
+      }
+
       const data = await res.json();
       setToastMessage(`✓ ${desc} completed successfully`);
       return data;
@@ -419,6 +456,39 @@ export function App() {
       setTimeout(() => setBusyAction(null), 800);
       setTimeout(() => setToastMessage(''), 3000);
     }
+  };
+
+  // Submit handler for Admin Auth Modal
+  const handleAuthSubmit = async (e) => {
+    e.preventDefault();
+    if (!authModalToken.trim()) return;
+    setAdminToken(authModalToken.trim());
+    setHasAdminToken(true);
+    setShowAuthModal(false);
+    if (pendingAction) {
+      const { urlPath, method, body, desc } = pendingAction;
+      setPendingAction(null);
+      await triggerApi(urlPath, method, body, desc);
+    }
+  };
+
+  // Save handler for Connection & Security Settings
+  const handleSaveSettings = (e) => {
+    e.preventDefault();
+    saveCustomEndpoints(cfgApiUrl, cfgWsUrl);
+    setAdminToken(cfgAdminToken);
+    setHasAdminToken(Boolean(cfgAdminToken.trim()));
+    setShowSettingsModal(false);
+    setToastMessage('✓ Connection and security settings saved');
+    setEndpointVersion(v => v + 1);
+  };
+
+  // Clear admin token handler
+  const handleClearToken = () => {
+    clearAdminToken();
+    setCfgAdminToken('');
+    setHasAdminToken(false);
+    setToastMessage('Admin token cleared from browser session');
   };
 
   // CSV Export with all 9 columns
@@ -551,6 +621,21 @@ export function App() {
           <button className="nav-action-btn" onClick={exportCsv} title="Export filtered fleet telemetry to CSV">
             <Download size={12} />
             <span>Export CSV</span>
+          </button>
+
+          {/* Connection & Auth Settings */}
+          <button
+            className="theme-toggle-btn"
+            onClick={() => {
+              setCfgApiUrl(getApiBaseUrl() || '');
+              setCfgWsUrl(getWsUrl() || '');
+              setCfgAdminToken(getAdminToken() || '');
+              setShowSettingsModal(true);
+            }}
+            title={hasAdminToken ? "Connection & Auth Settings (Admin Authenticated)" : "Connection & Auth Settings"}
+            aria-label="Settings"
+          >
+            {hasAdminToken ? <ShieldCheck size={16} color="#10b981" /> : <Settings size={15} color="var(--text-secondary)" />}
           </button>
 
           {/* Light / Dark Mode Toggle */}
@@ -1203,6 +1288,177 @@ export function App() {
         <div className="toast-bar">
           <Activity size={13} color="#6366f1" />
           <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* ─── MODAL 1: ADMIN AUTHORIZATION PROMPT ─── */}
+      {showAuthModal && (
+        <div className="modal-backdrop" onClick={() => setShowAuthModal(false)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">
+                <Lock size={15} color="#ef4444" />
+                <span>Admin Authorization Required</span>
+              </div>
+              <button className="modal-close-btn" onClick={() => setShowAuthModal(false)}>
+                <X size={15} />
+              </button>
+            </div>
+            <form onSubmit={handleAuthSubmit}>
+              <div className="modal-body">
+                <p className="modal-description">
+                  {pendingAction?.desc ? (
+                    <>The action <b>"{pendingAction.desc}"</b> alters fleet health and requires an authorized administrative token.</>
+                  ) : (
+                    <>This operation is restricted. Please enter your <code>ADMIN_TOKEN</code> to authorize execution.</>
+                  )}
+                </p>
+
+                <div className="modal-field">
+                  <label className="modal-label">
+                    <span>Admin Secret Token</span>
+                    <span className="modal-hint">Session Only</span>
+                  </label>
+                  <div className="modal-input-wrap">
+                    <input
+                      type={showTokenPlain ? 'text' : 'password'}
+                      className="modal-input mono"
+                      placeholder="Enter ADMIN_TOKEN..."
+                      value={authModalToken}
+                      onChange={e => setAuthModalToken(e.target.value)}
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      className="modal-input-toggle"
+                      onClick={() => setShowTokenPlain(v => !v)}
+                      title={showTokenPlain ? "Hide Token" : "Show Token"}
+                    >
+                      {showTokenPlain ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="modal-btn-secondary"
+                  onClick={() => setShowAuthModal(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="modal-btn-primary"
+                  disabled={!authModalToken.trim()}
+                >
+                  <Key size={13} />
+                  <span>Authenticate & Execute</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ─── MODAL 2: DYNAMIC CONNECTION & SECURITY SETTINGS ─── */}
+      {showSettingsModal && (
+        <div className="modal-backdrop" onClick={() => setShowSettingsModal(false)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">
+                <Settings size={15} color="var(--indigo)" />
+                <span>Connection & Security Settings</span>
+              </div>
+              <button className="modal-close-btn" onClick={() => setShowSettingsModal(false)}>
+                <X size={15} />
+              </button>
+            </div>
+            <form onSubmit={handleSaveSettings}>
+              <div className="modal-body">
+                <p className="modal-description">
+                  Configure dynamic backend endpoints and operator authentication. Zero hardcoded ports, URLs, or embedded secrets.
+                </p>
+
+                <div className="modal-field">
+                  <label className="modal-label">
+                    <span>Backend API URL</span>
+                    <span className="modal-hint">Empty = auto/proxy</span>
+                  </label>
+                  <input
+                    type="text"
+                    className="modal-input"
+                    placeholder="e.g. https://api.yourdomain.com (default: relative)"
+                    value={cfgApiUrl}
+                    onChange={e => setCfgApiUrl(e.target.value)}
+                  />
+                </div>
+
+                <div className="modal-field">
+                  <label className="modal-label">
+                    <span>WebSocket Stream URL</span>
+                    <span className="modal-hint">Empty = auto-derived</span>
+                  </label>
+                  <input
+                    type="text"
+                    className="modal-input"
+                    placeholder="e.g. wss://api.yourdomain.com/ws (default: auto)"
+                    value={cfgWsUrl}
+                    onChange={e => setCfgWsUrl(e.target.value)}
+                  />
+                </div>
+
+                <div className="modal-field">
+                  <label className="modal-label">
+                    <span>Admin Token (ADMIN_TOKEN)</span>
+                    <span className="modal-hint">{hasAdminToken ? 'Authenticated' : 'Unset'}</span>
+                  </label>
+                  <div className="modal-input-wrap">
+                    <input
+                      type={showTokenPlain ? 'text' : 'password'}
+                      className="modal-input mono"
+                      placeholder="Stored in temporary session storage only"
+                      value={cfgAdminToken}
+                      onChange={e => setCfgAdminToken(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="modal-input-toggle"
+                      onClick={() => setShowTokenPlain(v => !v)}
+                      title={showTokenPlain ? "Hide Token" : "Show Token"}
+                    >
+                      {showTokenPlain ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                {hasAdminToken && (
+                  <button
+                    type="button"
+                    className="modal-btn-secondary"
+                    onClick={handleClearToken}
+                    style={{ marginRight: 'auto', color: 'var(--rose)' }}
+                  >
+                    Clear Token
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="modal-btn-secondary"
+                  onClick={() => setShowSettingsModal(false)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="modal-btn-primary">
+                  <Check size={13} />
+                  <span>Save Configuration</span>
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

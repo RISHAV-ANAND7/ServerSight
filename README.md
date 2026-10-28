@@ -289,16 +289,31 @@ node agent/agent.js
 
 ---
 
-## 🔒 Security, Authentication & Input Guardrails
+## 🔒 Security, Authentication & Dynamic Architecture
 
-ServerSight implements a fail-secure architecture that segregates public metrics from administrative controls:
+ServerSight implements a fail-secure architecture that segregates public metrics from administrative controls with **zero hardcoded ports, URLs, or secrets in client-side code**:
 
-### 1. Ingestion Authentication (`AGENT_TOKEN`)
+### 1. Dynamic Endpoints & Separately Hosted Frontend Deployments
+- **Zero Hardcoded Ports or Hostnames**: The dashboard does not hardcode port `:4000` or `localhost`.
+- **Automatic Resolution**:
+  - In local development or reverse proxy setups, relative paths (`/api` and `/ws`) are used automatically.
+  - In separate frontend hostings (e.g. Vercel, Netlify, Cloudflare Pages), the backend target is resolved via environment variables:
+    - `VITE_API_URL`: Base HTTP URL of the backend (e.g., `https://api.yourdomain.com`).
+    - `VITE_WS_URL`: WebSocket stream URL (e.g., `wss://api.yourdomain.com/ws`).
+  - Operators can also configure or override endpoints live via the in-app **Connection & Security Settings** dialog.
+- **Cross-Origin Resource Sharing (CORS)**: The Node.js server includes native CORS headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Headers`) allowing separately hosted frontends to make cross-origin telemetry queries.
+
+### 2. Zero Hardcoded Admin Tokens & Interactive Authorization
+- **No Embedded Secrets in Browser Bundles**: The frontend contains **zero** hardcoded administrative tokens or passwords.
+- **Session-Only Storage**: When an operator inputs their `ADMIN_TOKEN`, it is stored exclusively in temporary browser `sessionStorage` and cleared upon browser close.
+- **On-Demand Authorization Modal**: If an operator triggers an administrative action (e.g., CPU spike injection, crash simulation) without an active token or if a token is rejected, an elegant **Admin Authorization Modal** prompts the operator to authenticate before executing the request.
+
+### 3. Ingestion Authentication (`AGENT_TOKEN`)
 - Ingestion endpoints (`/api/ingest`, `/api/heartbeat`) require authentication via header:
   `Authorization: Bearer <AGENT_TOKEN>` or `x-agent-token: <AGENT_TOKEN>`.
-- In production (`NODE_ENV=production`), `AGENT_TOKEN` must be explicitly configured. Missing or invalid tokens fail closed with `HTTP 401` or `HTTP 403`.
+- In production (`NODE_ENV=production`), `AGENT_TOKEN` must be explicitly configured in the server environment. Missing or invalid tokens fail closed with `HTTP 401` or `HTTP 403`.
 
-### 2. Simulation & Chaos Lockdown (`ADMIN_TOKEN`)
+### 4. Simulation & Chaos Lockdown (`ADMIN_TOKEN`)
 - Endpoints capable of injecting artificial faults (`/api/anomaly/simulate`, `/api/agent/simulate-crash`, `/api/agent/simulate-outage`, `/api/fault/delay-packets`, `/api/faults/reset`) return `HTTP 403 Forbidden` in production by default.
 - To enable chaos testing in lab environments, configure:
   `ENABLE_CHAOS_LAB=true` and `ADMIN_TOKEN=<secret>`.
