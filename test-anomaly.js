@@ -34,6 +34,7 @@ function triggerSimulateAnomaly(nodeId, metric, value, durationMs) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'x-admin-token': process.env.ADMIN_TOKEN || 'serversight-admin-secret-token',
         'Content-Length': Buffer.byteLength(postData)
       }
     }, (res) => {

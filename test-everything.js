@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import http from 'http';
-import { calculateBackoff } from './agent/agent.js';
+import { calculateBackoff, ServerSightAgent } from './agent/agent.js';
 
 console.log('===============================================================');
 console.log('     SERVERSIGHT — COMPREHENSIVE TEST SUITE                  ');
@@ -9,14 +9,20 @@ console.log('===============================================================\n')
 const BASE_URL = 'http://localhost:4000';
 const WS_URL = 'ws://localhost:4000/ws';
 
-function api(path, method = 'GET', body = null) {
+const AGENT_TOKEN = process.env.AGENT_TOKEN || 'serversight-agent-secret-token';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'serversight-admin-secret-token';
+
+function api(path, method = 'GET', body = null, customHeaders = {}) {
   return new Promise((resolve, reject) => {
     const postData = body ? JSON.stringify(body) : null;
     const req = http.request(`${BASE_URL}${path}`, {
       method,
       headers: {
         'Content-Type': 'application/json',
-        ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {})
+        'Authorization': `Bearer ${AGENT_TOKEN}`,
+        'x-admin-token': ADMIN_TOKEN,
+        ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {}),
+        ...customHeaders
       }
     }, (res) => {
       let data = '';
@@ -250,6 +256,50 @@ async function runAllTests() {
   assert(states.has('recovering') || states.has('offline'), 'Observed RECOVERING or OFFLINE state during outage');
   assert(states.has('healthy'), 'Observed HEALTHY state after outage recovered');
 
+  // 4.5 Real Retry Scheduler with Jitter
+  const schedAgent = new ServerSightAgent({
+    id: 'test-agent-sched-verification',
+    baseUrl: 'http://127.0.0.1:9999',
+    reportIntervalMs: 1000,
+    baseBackoffMs: 1000,
+    maxBackoffMs: 30000
+  });
+  schedAgent.running = true;
+  await schedAgent.report();
+  assert(schedAgent.consecutiveFails === 1, 'Agent increments failure counter on ingestion error');
+  assert(schedAgent.nextScheduledDelay >= 1000 && schedAgent.nextScheduledDelay <= 2000, `Agent schedules real retry delay with jitter (${schedAgent.nextScheduledDelay}ms in [1000..2000]ms)`);
+  assert(schedAgent.timer !== null, 'Agent active retry timer is set');
+  schedAgent.stop();
+
+  // 4.6 Concurrency Overlap Protection
+  const mutAgent = new ServerSightAgent({ id: 'test-agent-mutex-check', baseUrl: BASE_URL });
+  mutAgent.isReporting = true;
+  const skipCheck = await mutAgent.report();
+  assert(skipCheck.skipped === true && skipCheck.reason === 'overlap', 'Agent reporting mutex prevents overlapping telemetry reports');
+  mutAgent.isReporting = false;
+  mutAgent.stop();
+
+  // 4.7 Agent Outage Buffering and Full Recovery Drain
+  const recAgent = new ServerSightAgent({ id: 'test-agent-full-recovery', baseUrl: BASE_URL, reportIntervalMs: 1000 });
+  recAgent.running = true;
+  await recAgent.report(); // Initial report
+
+  // Outage simulation
+  recAgent.baseUrl = 'http://127.0.0.1:9999';
+  await recAgent.report();
+  await recAgent.report();
+  assert(recAgent.localBuffer.length === 2, 'Agent successfully buffers samples locally during outage');
+  assert(recAgent.consecutiveFails === 2, 'Agent records consecutive failure count during outage');
+
+  // Network restoration
+  recAgent.baseUrl = BASE_URL;
+  const flushedRes = await recAgent.report();
+  assert(flushedRes.success === true, 'Agent recovery attempt succeeds upon network restoration');
+  assert(recAgent.localBuffer.length === 0, 'Agent completely drains local backlog to server');
+  assert(recAgent.consecutiveFails === 0, 'Agent resets failure counter to 0 upon successful recovery');
+  assert(recAgent.nextScheduledDelay === 1000, 'Agent resumes regular reporting interval after recovery');
+  recAgent.stop();
+
   console.log('\n─── SECTION 5: FRONTEND DASHBOARD FEATURES & INTEGRITY ───');
   assert(node01.role === 'API', 'Node role classification intact');
   assert(node01.region === 'us-east-1', 'Node region filtering criteria intact');
@@ -257,6 +307,138 @@ async function runAllTests() {
   // CSV output format simulation
   const csvHeader = ['Node', 'Role', 'Region', 'IP', 'CPU %', 'Mem %', 'Net In Mbps', 'Net Out Mbps', 'Status'];
   assert(csvHeader.length === 9, 'CSV Export schema includes all 9 fleet columns');
+
+  console.log('\n─── SECTION 6: SECURITY, AUTHENTICATION & INPUT VALIDATION ───');
+
+  // 6.1 Unauthenticated Ingest Rejection (HTTP 401)
+  const unauthRes = await api('/api/ingest', 'POST', {
+    id: 'unauth-node',
+    name: 'rogue-node',
+    cpu: 50, memory: 50
+  }, { 'Authorization': '', 'x-agent-token': '' });
+  assert(unauthRes.status === 401, 'POST /api/ingest without token is rejected with 401 Unauthorized');
+  assert(unauthRes.body.error && unauthRes.body.error.includes('Authentication required'), '401 response explicitly details authentication requirement');
+
+  // 6.2 Invalid Token Rejection (HTTP 403)
+  const invalidAuthRes = await api('/api/ingest', 'POST', {
+    id: 'invalid-node',
+    name: 'invalid-node',
+    cpu: 50, memory: 50
+  }, { 'Authorization': 'Bearer bad-token-12345', 'x-agent-token': '' });
+  assert(invalidAuthRes.status === 403, 'POST /api/ingest with invalid token is rejected with 403 Forbidden');
+
+  // 6.3 Valid Ingestion via x-agent-token header
+  const xTokenRes = await api('/api/ingest', 'POST', {
+    id: 'test-xtoken-node',
+    name: 'xtoken-node',
+    cpu: 35.0, memory: 45.0, netIn: 10, netOut: 5, seq: 1
+  }, { 'Authorization': '', 'x-agent-token': AGENT_TOKEN });
+  assert(xTokenRes.status === 202 && xTokenRes.body.accepted === true, 'POST /api/ingest accepts valid token via x-agent-token header');
+
+  // 6.4 Unauthenticated Heartbeat Rejection
+  const unauthHbRes = await api('/api/heartbeat', 'POST', { id: 'node-01', seq: 105 }, { 'Authorization': '', 'x-agent-token': '' });
+  assert(unauthHbRes.status === 401, 'POST /api/heartbeat without token is rejected with 401 Unauthorized');
+
+  // 6.5 Parameter Validation: Batch Size Capping (Max 100)
+  const oversizedBatch = Array.from({ length: 105 }, (_, i) => ({
+    id: `spam-node-${i}`,
+    name: `spam-node-${i}`,
+    cpu: 10, memory: 10, seq: i + 1
+  }));
+  const batchCapRes = await api('/api/ingest', 'POST', { batch: oversizedBatch });
+  assert(batchCapRes.status === 400, 'Ingest batch exceeding 100 items is rejected with 400 Bad Request');
+  assert(batchCapRes.body.error && batchCapRes.body.error.includes('maximum limit of 100'), 'Error message confirms batch limit cap');
+
+  // 6.6 Parameter Capping: Boundary Clamping
+  const boundedNodeRes = await api('/api/ingest', 'POST', {
+    id: 'test-bounded-node',
+    name: 'test-bounded-node',
+    cpu: 250,      // should be clamped to 100%
+    memory: -50,   // should be clamped to 0%
+    netIn: -20,    // should be clamped to 0
+    netOut: 999999,// should be clamped to 100000 Mbps
+    seq: 1
+  });
+  assert(boundedNodeRes.status === 202, 'POST /api/ingest accepts and clamps out-of-boundary values safely');
+  const nodesCheck = await api('/api/nodes');
+  const boundedNode = nodesCheck.body.find(n => n.id === 'test-bounded-node');
+  assert(boundedNode && boundedNode.cpu === 100, `Excessive CPU (>100%) clamped to 100% (actual: ${boundedNode?.cpu}%)`);
+  assert(boundedNode && boundedNode.memory === 0, `Negative Memory (<0%) clamped to 0% (actual: ${boundedNode?.memory}%)`);
+  assert(boundedNode && boundedNode.netIn === 0, `Negative NetIn clamped to 0 Mbps (actual: ${boundedNode?.netIn})`);
+  assert(boundedNode && boundedNode.netOut === 100000, `Excessive NetOut clamped to 100000 Mbps (actual: ${boundedNode?.netOut})`);
+
+  // 6.7 Simulation Endpoint Protection: Anomaly Metric Validation
+  const invalidMetricRes = await api('/api/anomaly/simulate', 'POST', {
+    nodeId: 'node-01',
+    metric: 'unsupported_metric_xyz',
+    value: 50
+  });
+  assert(invalidMetricRes.status === 400, 'POST /api/anomaly/simulate with unsupported metric rejected with 400 Bad Request');
+
+  // 6.8 Simulation Duration Capping
+  const cappedDurationRes = await api('/api/anomaly/simulate', 'POST', {
+    nodeId: 'node-01',
+    metric: 'cpu',
+    value: 70,
+    durationMs: 9999999 // excessive duration
+  });
+  assert(cappedDurationRes.status === 200, 'POST /api/anomaly/simulate accepts request with duration capping');
+  assert(cappedDurationRes.body.anomaly.durationMs <= 60000, `Excessive simulation duration capped to <= 60000ms (actual: ${cappedDurationRes.body.anomaly.durationMs}ms)`);
+
+  console.log('\n─── SECTION 7: DEMO MODE & LIVE-AGENT TELEMETRY ISOLATION ───');
+
+  // 7.1 Demo Status endpoint returns valid configuration
+  const demoStatusRes = await api('/api/demo/status');
+  assert(demoStatusRes.status === 200, 'GET /api/demo/status returns 200 OK');
+  assert(demoStatusRes.body.demoMode === true, 'Demo mode is enabled by default in development');
+  assert(demoStatusRes.body.simulatedNodesCount >= 6, `Simulated nodes count is tracked (${demoStatusRes.body.simulatedNodesCount} simulated)`);
+
+  // 7.2 Initial seed nodes are properly tagged as simulated
+  const allNodesRes = await api('/api/nodes');
+  const simNode1 = allNodesRes.body.find(n => n.id === 'node-01');
+  assert(simNode1 && simNode1.source === 'simulated', 'Synthetic demo node has source = "simulated"');
+  assert(simNode1 && simNode1.isSimulated === true, 'Synthetic demo node has isSimulated = true');
+
+  // 7.3 Live-Agent filter endpoint returns only real agents
+  const preLiveRes = await api('/api/nodes?view=live');
+  assert(preLiveRes.status === 200, 'GET /api/nodes?view=live returns 200 OK');
+  assert(Array.isArray(preLiveRes.body), 'Live nodes returned as an array');
+  const simulatedInLive = preLiveRes.body.filter(n => n.isSimulated || n.source !== 'agent');
+  assert(simulatedInLive.length === 0, 'Live nodes view strictly excludes all synthetic/simulated nodes');
+
+  // 7.4 Simulated filter endpoint returns simulated nodes
+  const simViewRes = await api('/api/nodes?view=simulated');
+  assert(simViewRes.status === 200 && simViewRes.body.length >= 6, 'GET /api/nodes?view=simulated returns demonstration fleet');
+
+  // 7.5 Ingesting real agent telemetry registers node with source='agent' and isSimulated=false
+  await api('/api/ingest', 'POST', {
+    id: 'test-live-verified-node',
+    name: 'prod-verified-worker',
+    region: 'us-east-1',
+    role: 'Worker',
+    cpu: 28.5,
+    memory: 55.0,
+    netIn: 14.2,
+    netOut: 8.7,
+    seq: 1
+  });
+  const postLiveRes = await api('/api/nodes?view=live');
+  const liveAgentNode = postLiveRes.body.find(n => n.id === 'test-live-verified-node');
+  assert(liveAgentNode !== undefined, 'Live-agent view includes ingested agent node');
+  assert(liveAgentNode && liveAgentNode.source === 'agent', 'Ingested agent node tagged source = "agent"');
+  assert(liveAgentNode && liveAgentNode.isSimulated === false, 'Ingested agent node tagged isSimulated = false');
+  assert(liveAgentNode && liveAgentNode.cpu === 28.5, 'Live-agent view reflects pure unadulterated telemetry (CPU 28.5%)');
+
+  // 7.6 Health endpoint reports live agent and simulated node counters
+  const healthWithLiveRes = await api('/api/health');
+  assert(healthWithLiveRes.body.liveAgents >= 1, `GET /api/health tracks live agent count (${healthWithLiveRes.body.liveAgents} live)`);
+  assert(healthWithLiveRes.body.simulatedNodes >= 6, `GET /api/health tracks simulated nodes (${healthWithLiveRes.body.simulatedNodes} simulated)`);
+
+  // 7.7 Toggle demo mode endpoint
+  const toggleOffRes = await api('/api/demo/toggle', 'POST', { enabled: false });
+  assert(toggleOffRes.status === 200 && toggleOffRes.body.demoMode === false, 'POST /api/demo/toggle can disable demo mode');
+  const toggleOnRes = await api('/api/demo/toggle', 'POST', { enabled: true });
+  assert(toggleOnRes.status === 200 && toggleOnRes.body.demoMode === true, 'POST /api/demo/toggle can enable demo mode');
 
   console.log('\n===============================================================');
   console.log(`  ALL ${total} COMPREHENSIVE TESTS PASSED SUCCESSFULLY! (${passed}/${total})`);

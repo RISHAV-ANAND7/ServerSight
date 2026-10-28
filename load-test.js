@@ -113,7 +113,10 @@ async function run() {
       try {
         const resp = await fetch(`${SERVER_BASE}/api/ingest`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            'authorization': `Bearer ${process.env.AGENT_TOKEN || 'serversight-agent-secret-token'}`
+          },
           body: JSON.stringify({ batch }),
           signal: AbortSignal.timeout(3000)
         });

@@ -13,8 +13,17 @@ function percentile(sortedArr, p) {
   return sortedArr[Math.max(0, Math.min(idx, sortedArr.length - 1))];
 }
 
+const AGENT_TOKEN = process.env.AGENT_TOKEN || 'serversight-agent-secret-token';
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'serversight-admin-secret-token';
+
 async function api(path, method = 'GET', body = null) {
-  const opts = { method, headers: {} };
+  const opts = {
+    method,
+    headers: {
+      'authorization': `Bearer ${AGENT_TOKEN}`,
+      'x-admin-token': ADMIN_TOKEN
+    }
+  };
   if (body) {
     opts.headers['content-type'] = 'application/json';
     opts.body = JSON.stringify(body);

@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import http from 'http';
-import { calculateBackoff } from './agent/agent.js';
+import { calculateBackoff, ServerSightAgent } from './agent/agent.js';
 
 console.log('=== DISTRIBUTED AGENT HEALTH & RECOVERY TEST SUITE ===\n');
 
@@ -14,6 +14,8 @@ function apiRequest(path, method = 'GET', body = null) {
       method,
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.AGENT_TOKEN || 'serversight-agent-secret-token'}`,
+        'x-admin-token': process.env.ADMIN_TOKEN || 'serversight-admin-secret-token',
         ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {})
       }
     }, (res) => {
@@ -174,7 +176,98 @@ async function runResilienceTests() {
   });
 
   console.log('\n✓ State Machine transitions verified across full lifecycle:');
-  console.log(`  Observed States: ${Array.from(observedStates).map(s => s.toUpperCase()).join(' ➜ ')}`);
+  console.log(`  Observed States: ${Array.from(observedStates).map(s => s.toUpperCase()).join(' ➜ ')}\n`);
+
+  console.log('--- TEST 6: REAL RETRY SCHEDULER & JITTER TIMING ---');
+  // Initialize test agent targeting an unreachable address
+  const offlineAgent = new ServerSightAgent({
+    id: 'test-retry-scheduler-agent',
+    baseUrl: 'http://127.0.0.1:9999', // offline port
+    reportIntervalMs: 1000,
+    baseBackoffMs: 1000,
+    maxBackoffMs: 30000
+  });
+  offlineAgent.running = true;
+
+  const res1 = await offlineAgent.report();
+  if (res1.success === false && offlineAgent.consecutiveFails === 1) {
+    const delay1 = offlineAgent.nextScheduledDelay;
+    if (delay1 >= 1000 && delay1 <= 2000 && offlineAgent.timer !== null) {
+      console.log(`✓ Attempt 1 failure scheduled real backoff timer: ${delay1}ms (range: [1000..2000]ms).`);
+    } else {
+      throw new Error(`Scheduled backoff delay out of range: ${delay1}ms`);
+    }
+  } else {
+    throw new Error(`Expected failure on attempt 1, got ${JSON.stringify(res1)}`);
+  }
+
+  const res2 = await offlineAgent.report();
+  if (res2.success === false && offlineAgent.consecutiveFails === 2) {
+    const delay2 = offlineAgent.nextScheduledDelay;
+    if (delay2 >= 1000 && delay2 <= 4000 && offlineAgent.timer !== null) {
+      console.log(`✓ Attempt 2 failure scheduled exponential backoff timer: ${delay2}ms (range: [1000..4000]ms).\n`);
+    } else {
+      throw new Error(`Scheduled backoff delay out of range: ${delay2}ms`);
+    }
+  } else {
+    throw new Error(`Expected failure on attempt 2, got ${JSON.stringify(res2)}`);
+  }
+  offlineAgent.stop();
+
+  console.log('--- TEST 7: OVERLAPPING EXECUTION PREVENTION (CONCURRENCY MUTEX) ---');
+  const mutexAgent = new ServerSightAgent({
+    id: 'test-mutex-agent',
+    baseUrl: BASE_URL
+  });
+  mutexAgent.running = true;
+  // Artificially engage reporting mutex to simulate in-flight request
+  mutexAgent.isReporting = true;
+
+  const overlapRes = await mutexAgent.report();
+  if (overlapRes.skipped === true && overlapRes.reason === 'overlap') {
+    console.log('✓ In-flight mutex successfully prevented overlapping report execution.\n');
+  } else {
+    throw new Error(`Expected report to be skipped due to overlap mutex, got: ${JSON.stringify(overlapRes)}`);
+  }
+  mutexAgent.isReporting = false;
+  mutexAgent.stop();
+
+  console.log('--- TEST 8: AGENT SIMULATED OUTAGE & FULL RECOVERY LIFECYCLE ---');
+  const recoveryAgent = new ServerSightAgent({
+    id: 'test-agent-outage-recovery',
+    baseUrl: BASE_URL,
+    reportIntervalMs: 1000
+  });
+  recoveryAgent.running = true;
+
+  // Step 1: Initial healthy report
+  const initialRes = await recoveryAgent.report();
+  if (!initialRes.success) {
+    throw new Error('Initial agent report failed');
+  }
+  console.log('✓ Step 1: Agent connected and reported initial healthy telemetry.');
+
+  // Step 2: Simulate network outage by altering target URL
+  recoveryAgent.baseUrl = 'http://127.0.0.1:9999';
+  console.log('  Simulating network outage (port 9999 unreachable)...');
+  await recoveryAgent.report();
+  await recoveryAgent.report();
+  if (recoveryAgent.localBuffer.length === 2 && recoveryAgent.consecutiveFails === 2) {
+    console.log(`✓ Step 2: During outage, agent buffered ${recoveryAgent.localBuffer.length} samples locally and incremented backoff.`);
+  } else {
+    throw new Error(`Expected 2 buffered samples, got ${recoveryAgent.localBuffer.length}`);
+  }
+
+  // Step 3: Restore connection and trigger recovery retry
+  recoveryAgent.baseUrl = BASE_URL;
+  console.log('  Restoring network connection to server...');
+  const recoverRes = await recoveryAgent.report();
+  if (recoverRes.success && recoveryAgent.localBuffer.length === 0 && recoveryAgent.consecutiveFails === 0) {
+    console.log(`✓ Step 3: Outage recovered! Drained backlog to 0, reset fails to 0, and resumed regular reporting interval (${recoveryAgent.nextScheduledDelay}ms).`);
+  } else {
+    throw new Error(`Outage recovery failed: ${JSON.stringify(recoverRes)}`);
+  }
+  recoveryAgent.stop();
 
   console.log('\n======================================================');
   console.log('ALL DISTRIBUTED AGENT HEALTH & RECOVERY TESTS PASSED');

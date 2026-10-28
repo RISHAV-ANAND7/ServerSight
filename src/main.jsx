@@ -6,7 +6,7 @@ import {
   Globe2, Pause, Play, Search, Server, Box, ShieldAlert,
   TrendingDown, TrendingUp, X, Wifi, Zap, RefreshCw,
   FlaskConical, Clock, Flame, LayoutGrid, List, HardDrive,
-  Layers, Terminal, Radio, Info, Trash2, ArrowRight
+  Layers, Terminal, Radio, Info, Trash2, ArrowRight, Bot, Sparkles
 } from 'lucide-react';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, PointElement,
@@ -194,18 +194,20 @@ function useAnomalyDetection(nodes) {
 
 // ─── Initial Seed Nodes ───────────────────────────────────────────────────────
 const INITIAL_NODES = [
-  { id: 'node-01', name: 'api-prod-us-east-1a', region: 'us-east-1', role: 'API', ip: '10.0.1.24', cpu: 31, memory: 63, netIn: 18, netOut: 8, status: 'healthy' },
-  { id: 'node-02', name: 'api-prod-us-east-1b', region: 'us-east-1', role: 'API', ip: '10.0.1.31', cpu: 47, memory: 71, netIn: 24, netOut: 11, status: 'healthy' },
-  { id: 'node-03', name: 'worker-prod-eu-west-1a', region: 'eu-west-1', role: 'Worker', ip: '10.2.4.16', cpu: 68, memory: 54, netIn: 12, netOut: 19, status: 'healthy' },
-  { id: 'node-04', name: 'db-primary-eu-west-1', region: 'eu-west-1', role: 'Database', ip: '10.2.8.5', cpu: 24, memory: 82, netIn: 37, netOut: 42, status: 'healthy' },
-  { id: 'node-05', name: 'cache-prod-ap-south-1', region: 'ap-south-1', role: 'Cache', ip: '10.4.2.11', cpu: 18, memory: 46, netIn: 8, netOut: 6, status: 'healthy' },
-  { id: 'node-06', name: 'worker-prod-ap-south-1', region: 'ap-south-1', role: 'Worker', ip: '10.4.3.19', cpu: 55, memory: 61, netIn: 15, netOut: 22, status: 'healthy' }
+  { id: 'node-01', name: 'api-prod-us-east-1a', region: 'us-east-1', role: 'API', ip: '10.0.1.24', cpu: 31, memory: 63, netIn: 18, netOut: 8, status: 'healthy', source: 'simulated', isSimulated: true },
+  { id: 'node-02', name: 'api-prod-us-east-1b', region: 'us-east-1', role: 'API', ip: '10.0.1.31', cpu: 47, memory: 71, netIn: 24, netOut: 11, status: 'healthy', source: 'simulated', isSimulated: true },
+  { id: 'node-03', name: 'worker-prod-eu-west-1a', region: 'eu-west-1', role: 'Worker', ip: '10.2.4.16', cpu: 68, memory: 54, netIn: 12, netOut: 19, status: 'healthy', source: 'simulated', isSimulated: true },
+  { id: 'node-04', name: 'db-primary-eu-west-1', region: 'eu-west-1', role: 'Database', ip: '10.2.8.5', cpu: 24, memory: 82, netIn: 37, netOut: 42, status: 'healthy', source: 'simulated', isSimulated: true },
+  { id: 'node-05', name: 'cache-prod-ap-south-1', region: 'ap-south-1', role: 'Cache', ip: '10.4.2.11', cpu: 18, memory: 46, netIn: 8, netOut: 6, status: 'healthy', source: 'simulated', isSimulated: true },
+  { id: 'node-06', name: 'worker-prod-ap-south-1', region: 'ap-south-1', role: 'Worker', ip: '10.4.3.19', cpu: 55, memory: 61, netIn: 15, netOut: 22, status: 'healthy', source: 'simulated', isSimulated: true }
 ];
 
 // ─── Main Application Component ───────────────────────────────────────────────
 function App() {
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'anomalies' | 'chaos_lab'
   const [viewMode, setViewMode] = useState('grid');     // 'grid' | 'table'
+  const [telemetryView, setTelemetryView] = useState('all'); // 'all' (Demo & Fleet) | 'live' (Live Agents Only)
+  const [serverDemoMode, setServerDemoMode] = useState(true);
   const [nodes, setNodes] = useState(INITIAL_NODES);
   const [metrics, setMetrics] = useState({ cpu: 40.5, memory: 62.8, networkIn: 114, networkOut: 108 });
   const [history, setHistory] = useState([]);
@@ -283,6 +285,7 @@ function App() {
           const pkt = JSON.parse(ev.data);
           if (pkt.nodes) setNodes(pkt.nodes);
           if (pkt.metrics) setMetrics(pkt.metrics);
+          if (pkt.demoMode !== undefined) setServerDemoMode(pkt.demoMode);
           const ts = pkt.timestamp || Date.now();
           histBufferRef.current.push({ ...pkt.metrics, timestamp: ts, seq: pkt.sequence || seqRef.current++ });
         } catch { }
@@ -306,29 +309,34 @@ function App() {
     };
   }, []);
 
-  // Anomaly Detection State
-  const incidents = useAnomalyDetection(nodes);
+  // Scoped Telemetry Partitioning (Strict Separation of Live Agents from Synthetic Demo Nodes)
+  const liveNodes = useMemo(() => nodes.filter(n => n.source === 'agent' && !n.isSimulated), [nodes]);
+  const simulatedNodes = useMemo(() => nodes.filter(n => n.source !== 'agent' || n.isSimulated), [nodes]);
+  const scopedNodes = useMemo(() => telemetryView === 'live' ? liveNodes : nodes, [telemetryView, liveNodes, nodes]);
+
+  // Anomaly Detection State (evaluated on scopedNodes to keep live view free from synthetic demo spikes)
+  const incidents = useAnomalyDetection(scopedNodes);
   const activeIncidents = useMemo(() => Object.values(incidents).filter(i => !i.resolved), [incidents]);
 
-  // Derived Fleet Metrics
-  const activeNodes = nodes.filter(n => n.status !== 'offline');
+  // Derived Fleet Metrics (calculated strictly from scopedNodes)
+  const activeNodes = scopedNodes.filter(n => n.status !== 'offline');
   const avgCpu = activeNodes.length
     ? activeNodes.reduce((s, n) => s + n.cpu, 0) / activeNodes.length
-    : (nodes.length ? nodes.reduce((s, n) => s + n.cpu, 0) / nodes.length : metrics.cpu);
+    : (scopedNodes.length ? scopedNodes.reduce((s, n) => s + n.cpu, 0) / scopedNodes.length : 0);
   const avgMem = activeNodes.length
     ? activeNodes.reduce((s, n) => s + n.memory, 0) / activeNodes.length
-    : (nodes.length ? nodes.reduce((s, n) => s + n.memory, 0) / nodes.length : metrics.memory);
-  const totalIn = nodes.reduce((s, n) => s + (n.status === 'offline' ? 0 : n.netIn), 0);
-  const totalOut = nodes.reduce((s, n) => s + (n.status === 'offline' ? 0 : n.netOut), 0);
+    : (scopedNodes.length ? scopedNodes.reduce((s, n) => s + n.memory, 0) / scopedNodes.length : 0);
+  const totalIn = scopedNodes.reduce((s, n) => s + (n.status === 'offline' ? 0 : n.netIn), 0);
+  const totalOut = scopedNodes.reduce((s, n) => s + (n.status === 'offline' ? 0 : n.netOut), 0);
 
-  const healthyCount = nodes.filter(n => n.status === 'healthy').length;
-  const recoveringCount = nodes.filter(n => n.status === 'recovering').length;
-  const staleCount = nodes.filter(n => n.status === 'stale').length;
-  const offlineCount = nodes.filter(n => n.status === 'offline').length;
+  const healthyCount = scopedNodes.filter(n => n.status === 'healthy').length;
+  const recoveringCount = scopedNodes.filter(n => n.status === 'recovering').length;
+  const staleCount = scopedNodes.filter(n => n.status === 'stale').length;
+  const offlineCount = scopedNodes.filter(n => n.status === 'offline').length;
 
-  // Filtered Nodes
+  // Filtered Nodes (from scopedNodes)
   const filteredNodes = useMemo(() => {
-    return nodes.filter(n => {
+    return scopedNodes.filter(n => {
       const matchStatus = statusFilter === 'All' || n.status === statusFilter;
       const matchRegion = regionFilter === 'All' || n.region === regionFilter;
       const matchRole = roleFilter === 'All' || n.role === roleFilter;
@@ -336,7 +344,7 @@ function App() {
       const matchQuery = !q || `${n.name} ${n.ip} ${n.role} ${n.region}`.toLowerCase().includes(q);
       return matchStatus && matchRegion && matchRole && matchQuery;
     });
-  }, [nodes, statusFilter, regionFilter, roleFilter, query]);
+  }, [scopedNodes, statusFilter, regionFilter, roleFilter, query]);
 
   // Chart Telemetry Data Slices
   const visibleHistory = useMemo(() => {
@@ -396,7 +404,10 @@ function App() {
     try {
       await fetch(endpoint, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          'x-admin-token': 'serversight-admin-secret-token'
+        },
         body: JSON.stringify(body)
       });
       setStatusNotification(`Simulation active: ${label}`);
@@ -412,7 +423,10 @@ function App() {
     setBusyAction('reset');
     setStatusNotification('Clearing all active faults and restoring normal state...');
     try {
-      await fetch('/api/faults/reset', { method: 'POST' });
+      await fetch('/api/faults/reset', {
+        method: 'POST',
+        headers: { 'x-admin-token': 'serversight-admin-secret-token' }
+      });
       setStatusNotification('All simulated faults cleared. Fleet returned to normal.');
     } catch (e) {
       setStatusNotification(`Reset error: ${e.message}`);
@@ -425,7 +439,10 @@ function App() {
   const handlePruneOfflineNodes = async () => {
     setBusyAction('prune');
     try {
-      const res = await fetch('/api/nodes/prune', { method: 'POST' });
+      const res = await fetch('/api/nodes/prune', {
+        method: 'POST',
+        headers: { 'x-admin-token': 'serversight-admin-secret-token' }
+      });
       const data = await res.json();
       setStatusNotification(`Cleaned up ${data.removedCount || 0} offline test node(s).`);
     } catch (e) {
@@ -537,6 +554,30 @@ function App() {
           </div>
 
           <div className="topbar-controls">
+            {/* Telemetry Mode Selector: Demo Fleet vs Live Agents Only */}
+            <div className="telemetry-mode-selector">
+              <button
+                className={`telemetry-mode-tab ${telemetryView === 'all' ? 'active demo' : ''}`}
+                onClick={() => setTelemetryView('all')}
+                title="View all fleet nodes including synthetic demo servers"
+              >
+                <Sparkles size={13} />
+                <span>Demo Fleet</span>
+                <span className="mode-count-pill demo">6 Sim</span>
+              </button>
+              <button
+                className={`telemetry-mode-tab ${telemetryView === 'live' ? 'active live' : ''}`}
+                onClick={() => setTelemetryView('live')}
+                title="Filter to pure host agent telemetry only (excludes all simulated nodes)"
+              >
+                <Radio size={13} className={liveNodes.length > 0 ? 'pulse-icon' : ''} />
+                <span>Live Agents Only</span>
+                <span className={`mode-count-pill ${liveNodes.length > 0 ? 'live' : 'zero'}`}>
+                  {liveNodes.length} Active
+                </span>
+              </button>
+            </div>
+
             <div className="topbar-search">
               <Search size={14} color="#64748b" />
               <input
@@ -571,6 +612,27 @@ function App() {
 
         {/* Content Body */}
         <div className="content-body">
+          {/* Live Agent Telemetry Banner */}
+          {telemetryView === 'live' && (
+            <div className="live-view-banner">
+              <div className="live-view-banner-left">
+                <div className="live-indicator-beacon" />
+                <div>
+                  <div className="live-banner-headline">PURE LIVE-AGENT TELEMETRY VIEW</div>
+                  <div className="live-banner-sub">
+                    Displaying authentic host agent telemetry only. All 6 synthetic demonstration nodes and simulated metric fluctuations are excluded.
+                  </div>
+                </div>
+              </div>
+              <div className="live-banner-right">
+                <span className="live-agent-badge-count">{liveNodes.length} Verified {liveNodes.length === 1 ? 'Agent' : 'Agents'}</span>
+                <button className="btn-return-demo" onClick={() => setTelemetryView('all')}>
+                  <Sparkles size={12} /> Switch to Demo Mode
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Status notification toast/pill if any action running */}
           {statusNotification && (
             <div style={{
@@ -615,36 +677,61 @@ function App() {
           {/* ══════════════ TAB 1: FLEET OVERVIEW ══════════════ */}
           {activeTab === 'overview' && (
             <>
-              {/* Perfectly Balanced 5-Column Metric Ribbon */}
-              <div className="kpi-grid">
-                {/* 1. Cluster Health */}
-                <div className="kpi-card">
-                  <div className="kpi-card-header">
-                    <span className="kpi-card-title">
-                      <Wifi size={13} color="#10b981" /> Cluster Health
-                    </span>
-                    <span className="kpi-status-badge">
-                      {healthyCount === nodes.length ? 'Optimal' : `${offlineCount > 0 ? `${offlineCount} Offline` : 'Degraded'}`}
-                    </span>
+              {telemetryView === 'live' && liveNodes.length === 0 ? (
+                <div className="empty-live-agents-card">
+                  <div className="empty-icon-halo">
+                    <Radio size={28} color="#10b981" />
                   </div>
-                  <div className="kpi-value-row">
-                    <span className="kpi-number">{healthyCount}</span>
-                    <span className="kpi-unit">/ {nodes.length} online</span>
+                  <h3 className="empty-live-title">No Live Agents Currently Connected</h3>
+                  <p className="empty-live-text">
+                    ServerSight is in <b>Live Agents Only</b> mode, filtering out all 6 synthetic demonstration nodes. Telemetry from real hosts will stream here in real time as soon as an agent is started.
+                  </p>
+                  <div className="empty-agent-command-box">
+                    <div className="cmd-header">
+                      <span>Start a live host telemetry agent</span>
+                      <span className="cmd-tag">Terminal</span>
+                    </div>
+                    <code>AGENT_TOKEN=serversight-agent-secret-token node agent/agent.js</code>
                   </div>
-                  <div className="kpi-progress-track">
-                    <div
-                      className="kpi-progress-fill"
-                      style={{
-                        width: `${Math.round((healthyCount / Math.max(1, nodes.length)) * 100)}%`,
-                        background: healthyCount === nodes.length ? '#10b981' : '#f59e0b'
-                      }}
-                    />
-                  </div>
-                  <div className="kpi-subtext">
-                    <span>{Math.round((healthyCount / Math.max(1, nodes.length)) * 100)}% operational</span>
-                    {staleCount > 0 && <span style={{ color: '#f59e0b' }}>{staleCount} stale</span>}
+                  <div className="empty-actions">
+                    <button className="btn-primary" onClick={() => setTelemetryView('all')}>
+                      <Sparkles size={14} />
+                      <span>Switch to Demo Fleet (6 Simulated Nodes)</span>
+                    </button>
                   </div>
                 </div>
+              ) : (
+                <>
+                  {/* Perfectly Balanced 5-Column Metric Ribbon */}
+                  <div className="kpi-grid">
+                    {/* 1. Cluster Health */}
+                    <div className="kpi-card">
+                      <div className="kpi-card-header">
+                        <span className="kpi-card-title">
+                          <Wifi size={13} color="#10b981" /> Cluster Health
+                        </span>
+                        <span className="kpi-status-badge">
+                          {healthyCount === scopedNodes.length ? 'Optimal' : `${offlineCount > 0 ? `${offlineCount} Offline` : 'Degraded'}`}
+                        </span>
+                      </div>
+                      <div className="kpi-value-row">
+                        <span className="kpi-number">{healthyCount}</span>
+                        <span className="kpi-unit">/ {scopedNodes.length} online</span>
+                      </div>
+                      <div className="kpi-progress-track">
+                        <div
+                          className="kpi-progress-fill"
+                          style={{
+                            width: `${Math.round((healthyCount / Math.max(1, scopedNodes.length)) * 100)}%`,
+                            background: healthyCount === scopedNodes.length ? '#10b981' : '#f59e0b'
+                          }}
+                        />
+                      </div>
+                      <div className="kpi-subtext">
+                        <span>{Math.round((healthyCount / Math.max(1, scopedNodes.length)) * 100)}% operational</span>
+                        {staleCount > 0 && <span style={{ color: '#f59e0b' }}>{staleCount} stale</span>}
+                      </div>
+                    </div>
 
                 {/* 2. Fleet CPU */}
                 <div className="kpi-card">
@@ -908,13 +995,24 @@ function App() {
                           onClick={() => setSelectedNode(node)}
                         >
                           <div className="node-tile-top">
-                            <span className="role-badge">
-                              {node.role === 'Database' && <Database size={12} color="#f59e0b" />}
-                              {node.role === 'Cache' && <Box size={12} color="#0284c7" />}
-                              {node.role === 'API' && <Globe2 size={12} color="#6366f1" />}
-                              {node.role === 'Worker' && <Server size={12} color="#10b981" />}
-                              <span>{node.role}</span>
-                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span className="role-badge">
+                                {node.role === 'Database' && <Database size={12} color="#f59e0b" />}
+                                {node.role === 'Cache' && <Box size={12} color="#0284c7" />}
+                                {node.role === 'API' && <Globe2 size={12} color="#6366f1" />}
+                                {node.role === 'Worker' && <Server size={12} color="#10b981" />}
+                                <span>{node.role}</span>
+                              </span>
+                              {node.source === 'agent' && !node.isSimulated ? (
+                                <span className="source-tag-badge live">
+                                  <Radio size={9} /> Live
+                                </span>
+                              ) : (
+                                <span className="source-tag-badge sim">
+                                  <Bot size={9} /> Demo
+                                </span>
+                              )}
+                            </div>
 
                             <span className={`status-badge ${node.status || 'healthy'}`}>
                               <span style={{
@@ -1015,7 +1113,18 @@ function App() {
                           <tr key={node.id}>
                             <td>
                               <div className="table-node-name">{node.name}</div>
-                              <div style={{ fontSize: 11, color: '#64748b' }}>ID: {node.id}</div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                                <span style={{ fontSize: 11, color: '#64748b' }}>ID: {node.id}</span>
+                                {node.source === 'agent' && !node.isSimulated ? (
+                                  <span className="source-tag-badge live" style={{ padding: '1px 5px', fontSize: 9 }}>
+                                    <Radio size={8} /> Live
+                                  </span>
+                                ) : (
+                                  <span className="source-tag-badge sim" style={{ padding: '1px 5px', fontSize: 9 }}>
+                                    <Bot size={8} /> Sim
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td>
                               <span className="role-badge">{node.role}</span>
@@ -1077,6 +1186,8 @@ function App() {
               </div>
             </>
           )}
+        </>
+      )}
 
           {/* ══════════════ TAB 2: ANOMALY RADAR ══════════════ */}
           {activeTab === 'anomalies' && (
@@ -1116,11 +1227,23 @@ function App() {
                 </div>
               ) : (
                 <div className="incidents-list">
-                  {activeIncidents.map(inc => (
+                  {activeIncidents.map(inc => {
+                    const targetNode = nodes.find(n => n.id === inc.nodeId);
+                    const isLive = targetNode?.source === 'agent' && !targetNode?.isSimulated;
+                    return (
                     <div key={inc.id} className="incident-card">
                       <div className="incident-left">
                         <div className="incident-meta-row">
                           <span className="incident-badge">{inc.severity} Severity</span>
+                          {isLive ? (
+                            <span className="source-tag-badge live" style={{ fontSize: 10, padding: '1px 6px' }}>
+                              <Radio size={9} /> Live Agent
+                            </span>
+                          ) : (
+                            <span className="source-tag-badge sim" style={{ fontSize: 10, padding: '1px 6px' }}>
+                              <Bot size={9} /> Simulated Demo
+                            </span>
+                          )}
                           <span style={{ fontSize: 12, color: '#94a3b8' }}>
                             Deviation: <b>+{inc.zScore.toFixed(1)}&sigma; above average</b>
                           </span>
@@ -1142,7 +1265,8 @@ function App() {
                         <span>Reset Baseline</span>
                       </button>
                     </div>
-                  ))}
+                  );
+                })}
                 </div>
               )}
             </div>
@@ -1316,6 +1440,20 @@ function App() {
                       {selectedNode.status || 'healthy'}
                     </span>
                   </span>
+                </div>
+                <div className="info-item" style={{ gridColumn: 'span 2' }}>
+                  <span className="info-item-label">Telemetry Source & Origin</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                    {selectedNode.source === 'agent' && !selectedNode.isSimulated ? (
+                      <span className="source-tag-badge live" style={{ fontSize: 11, padding: '3px 8px' }}>
+                        <Radio size={11} /> Live Host Agent &bull; Verified Telemetry (/proc & OS counters)
+                      </span>
+                    ) : (
+                      <span className="source-tag-badge sim" style={{ fontSize: 11, padding: '3px 8px' }}>
+                        <Bot size={11} /> Synthetic Demonstration Server &bull; Harmonic Simulation
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
