@@ -82,6 +82,10 @@ flowchart LR
 
 ---
 
+
+<img width="640" height="329" alt="image" src="https://github.com/user-attachments/assets/7f680898-aa96-4af6-b70c-c0a1fde556bc" />
+
+
 ## ✨ Key Features
 
 - **Single-Screen Executive Command Center**: Formatted to fit standard 1080p and laptop viewports (`100vh`) with zero vertical page scrolling.
