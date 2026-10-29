@@ -655,7 +655,7 @@ export function App() {
         {/* Tile 1: Fleet Health */}
         <div className="kpi-tile">
           <div className="kpi-tile-header">
-            <span className="kpi-title"><Wifi size={12} color="#10b981" /> Cluster Health</span>
+            <span className="kpi-title"><Wifi size={13} color="#10b981" /> Cluster Health</span>
             <span className={`kpi-badge ${healthyCount === totalCount && totalCount > 0 ? 'optimal' : offlineCount > 0 ? 'alert' : 'warning'}`}>
               {totalCount === 0 ? 'Idle' : healthyCount === totalCount ? 'Optimal' : `${offlineCount} Offline`}
             </span>
@@ -683,15 +683,14 @@ export function App() {
         {/* Tile 2: Fleet CPU */}
         <div className="kpi-tile">
           <div className="kpi-tile-header">
-            <span className="kpi-title"><Cpu size={12} color="#6366f1" /> Avg Fleet CPU</span>
+            <span className="kpi-title"><Cpu size={13} color="#6366f1" /> Avg Fleet CPU</span>
             <span className={`kpi-badge ${avgCpu > 75 ? 'alert' : avgCpu > 50 ? 'warning' : 'optimal'}`}>
               {avgCpu > 75 ? 'High' : 'Normal'}
             </span>
           </div>
           <div className="kpi-body">
             <div className="kpi-metric">
-              <span className="kpi-value">{fmt(avgCpu, 1)}</span>
-              <span className="kpi-unit">%</span>
+              <span className="kpi-value">{fmt(avgCpu, 1)}<span className="kpi-unit percent">%</span></span>
             </div>
             <span className="kpi-sub">
               Peak: {fmt(Math.max(0, ...scopedNodes.map(n => n.cpu || 0)), 1)}%
@@ -711,18 +710,17 @@ export function App() {
         {/* Tile 3: Fleet Memory */}
         <div className="kpi-tile">
           <div className="kpi-tile-header">
-            <span className="kpi-title"><HardDrive size={12} color="#10b981" /> Memory Allocated</span>
+            <span className="kpi-title"><HardDrive size={13} color="#10b981" /> Memory Allocated</span>
             <span className={`kpi-badge ${avgMem > 80 ? 'alert' : avgMem > 65 ? 'warning' : 'optimal'}`}>
               {avgMem > 80 ? 'Constrained' : 'Nominal'}
             </span>
           </div>
           <div className="kpi-body">
             <div className="kpi-metric">
-              <span className="kpi-value">{fmt(avgMem, 1)}</span>
-              <span className="kpi-unit">%</span>
+              <span className="kpi-value">{fmt(avgMem, 1)}<span className="kpi-unit percent">%</span></span>
             </div>
             <span className="kpi-sub">
-              Active: {scopedNodes.filter(n => n.memory > 60).length} hosts &gt;60%
+              Peak: {fmt(Math.max(0, ...scopedNodes.map(n => n.memory || 0)), 1)}%
             </span>
           </div>
           <div className="kpi-bar">
@@ -739,7 +737,7 @@ export function App() {
         {/* Tile 4: Network Throughput */}
         <div className="kpi-tile">
           <div className="kpi-tile-header">
-            <span className="kpi-title"><Activity size={12} color="#06b6d4" /> Total Network I/O</span>
+            <span className="kpi-title"><Activity size={13} color="#06b6d4" /> Total Network I/O</span>
             <span className="kpi-badge optimal">Streaming</span>
           </div>
           <div className="kpi-body">
@@ -748,7 +746,7 @@ export function App() {
               <span className="kpi-unit">Mbps</span>
             </div>
             <span className="kpi-sub">
-              ↓ {fmt(totalNetIn, 1)} / ↑ {fmt(totalNetOut, 1)}
+              <span style={{ color: '#10b981', fontWeight: 600 }}>↓</span> {fmt(totalNetIn, 1)} <span style={{ opacity: 0.4, margin: '0 2px' }}>/</span> <span style={{ color: '#06b6d4', fontWeight: 600 }}>↑</span> {fmt(totalNetOut, 1)}
             </span>
           </div>
           <div className="kpi-bar">
